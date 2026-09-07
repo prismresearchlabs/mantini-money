@@ -1,0 +1,40 @@
+{
+  "name": "mantini-money",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1",
+    "lint": "eslint .",
+    "setup": "node scripts/setup.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.45",
+    "@ai-sdk/react": "^4.0.87",
+    "@clerk/nextjs": "^7.8.3",
+    "@libsql/client": "^0.17.4",
+    "ai": "^7.0.84",
+    "better-sqlite3": "13.0.3",
+    "lucide-react": "1.37.0",
+    "next": "16.3.3",
+    "plaid": "46.0.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-plaid-link": "5.0.0",
+    "recharts": "3.10.1",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "25.0.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.3",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
