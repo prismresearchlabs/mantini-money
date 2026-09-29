@@ -24,9 +24,12 @@ function financialContext(data: DashboardData) {
       unallocatedIncome: data.monthUnallocated,
     },
     cash: {
-      total: data.totalCash,
+      outsideTaxReserve: data.totalCash,
+      taxReserve: data.taxReserve.balance,
+      grossIncludingTaxReserve: data.grossCash,
       recentTrend: data.cashTrendData.slice(-60),
     },
+    netWorthAfterTaxReserve: data.netWorthAfterTaxReserve,
     spendingGuardrail: data.spendingGuide,
     connectedSources: data.items.map((item) => ({
       institution: item.institutionName,
@@ -36,6 +39,7 @@ function financialContext(data: DashboardData) {
     accounts: data.accounts.map((account) => ({
       institution: account.institutionName,
       name: account.name,
+      isTaxReserve: account.isTaxReserve,
       type: account.type,
       subtype: account.subtype,
       lastFour: account.mask,
@@ -95,6 +99,8 @@ Be concise, candid, numerate, and nonjudgmental. Help them enjoy their money whi
 
 Default to a compact answer: one direct conclusion followed by up to three useful bullets. Avoid generic filler, repeated disclaimers, or explaining what the app is.
 
+Lead with cash outside the tax reserve and net worth after the tax reserve. Reserved tax funds are earmarked and unavailable for lifestyle spending; do not add them back to spending capacity. Transfers to reserve do not reduce earned or taxable income and are not tax payments. The reserve balance is not an estimate of actual tax liability. If you mention gross cash, explicitly reconcile the reserve separately.
+
 Current private financial context:
 ${financialContext(data)}`,
   });
@@ -115,27 +121,30 @@ function chicagoDate() {
 
 export async function generateDailyBrief(force = false) {
   const date = chicagoDate();
+  const data = await loadDashboardData();
+  const contextKey = JSON.stringify(["tax-reserve-v1", data.taxReserve.accountIds, data.taxReserve.balance]);
   if (!force) {
     const [cached] = await queryRows<{ content: string; updated_at: string }>(
-      "SELECT content, updated_at FROM advisor_insights WHERE insight_date = ?",
-      [date],
+      "SELECT content, updated_at FROM advisor_insights WHERE insight_date = ? AND context_key = ?",
+      [date, contextKey],
     );
     if (cached) return { content: cached.content, updatedAt: cached.updated_at, cached: true };
   }
 
-  const agent = createFinanceAgent(await loadDashboardData());
+  const agent = createFinanceAgent(data);
   const result = await agent.generate({
     prompt:
       "Create today's proactive money briefing. Identify the single most useful observation, explain why it matters using exact numbers, and give one practical next action. Keep it under 90 words.",
     timeout: { totalMs: 55_000 },
   });
   await execute(
-    `INSERT INTO advisor_insights (insight_date, content)
-     VALUES (?, ?)
+    `INSERT INTO advisor_insights (insight_date, content, context_key)
+     VALUES (?, ?, ?)
      ON CONFLICT(insight_date) DO UPDATE SET
        content = excluded.content,
+       context_key = excluded.context_key,
        updated_at = CURRENT_TIMESTAMP`,
-    [date, result.text],
+    [date, result.text, contextKey],
   );
   return { content: result.text, updatedAt: new Date().toISOString(), cached: false };
 }

@@ -93,6 +93,12 @@ The source also includes an advanced hosted path using Clerk and Turso, but host
 - **Login/Clerk error during local setup:** Use `npm run dev`, not `npm start`; leave Clerk settings blank for the local walkthrough.
 - **Stale balances:** Use sync and inspect the connection status. Some institutions update data with a delay.
 
+## Tax reserve and planning
+
+The **Taxes** tab lets you designate USD cash accounts as a tax reserve. Accounts named Tax, Tax Reserve, or IRS are suggested automatically; a saved selection overrides that suggestion, including an intentionally empty selection. Headline cash, reconstructed cash history, net worth after reserve, and the spending guardrail exclude positive reserved funds. Full connected net worth remains visible for reconciliation. Reserve overdrafts remain deficits. Adjusted net-worth history uses recorded daily reserve balances and starts a separate history when the account selection changes.
+
+Income stays unchanged: moving money to a reserve is neither a reduction in taxable income nor an IRS payment. The optional **2026** estimator requires explicit filing status, income type, and full-year income. It supports single or married-jointly ordinary wages (federal income tax only) and one sole proprietor's net profit (including self-employment taxes). It assumes a full-year Texas resident and the basic standard deduction. Withholding and federal estimated payments are entered separately from reserved cash. It does not automatically treat bank deposits as taxable income, and it excludes QBI, credits, itemized deductions, capital gains, AMT, and other adjustments. Review its assumptions and official IRS/SSA/Texas sources before relying on the estimate. This is a planning comparison, not a return or quarterly payment schedule.
+
 ## Development
 
 Next.js App Router, React, TypeScript, libSQL/SQLite, Plaid, and the Vercel AI SDK. Run `npm test`, `npm run lint`, and `npm run build` after code changes. Tests require Node 24 LTS. See `CLAUDE.md` for a code map and the guided installation workflow. This is personal software shared as-is, not a multi-user finance service.

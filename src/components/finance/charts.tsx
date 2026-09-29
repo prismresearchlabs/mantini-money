@@ -321,7 +321,7 @@ export function FlowDiagram({
       : []),
     { name: "Taxes", value: taxes, color: "#d29587" },
     { name: "Invested", value: invested, color: "#8495bd" },
-    { name: "Saved", value: saved, color: "#729e94" },
+    { name: "Savings / tax reserve", value: saved, color: "#729e94" },
     {
       name: "Remaining",
       value: Math.max(0, available - out),

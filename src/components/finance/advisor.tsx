@@ -106,18 +106,18 @@ function SpendingContext({ data }: { data: DashboardData }) {
       <div className="advisor-allowance"><strong>{money(guide.remaining, true)}</strong><span>remaining in your flexible allowance</span></div>
       <div className="advisor-progress" role="progressbar" aria-label="Flexible allowance used" aria-valuenow={usedPercent} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${usedPercent}%` }} /></div>
       <div className="advisor-progress-labels"><span>{money(data.monthSpend)} spent</span><span>{money(guide.monthlyAllowance)} allowance</span></div>
-      <div className="advisor-protected"><ShieldCheck size={20} /><div><strong>{money(guide.protectedCash)} protected</strong><span>Savings + three months of recent spending</span></div></div>
+      <div className="advisor-protected"><ShieldCheck size={20} /><div><strong>{money(guide.protectedCash)} protected</strong><span>Savings + three months of recent spending, outside the tax reserve</span></div></div>
       <details className="advisor-method">
         <summary>How your allowance works <ChevronRight size={14} /></summary>
         <dl>
           <div><dt>Posted income</dt><dd>{money(data.monthIncome, true)}</dd></div>
-          <div><dt>Moved to savings</dt><dd>−{money(data.monthSaved, true)}</dd></div>
+          <div><dt>Moved to savings / tax reserve</dt><dd>−{money(data.monthSaved, true)}</dd></div>
           <div><dt>After-savings income</dt><dd>{money(guide.postReserveIncome, true)}</dd></div>
           <div><dt>{guide.incomeRate}% income allowance</dt><dd>{money(guide.incomeAllowance, true)}</dd></div>
           <div><dt>Cash above the protected floor</dt><dd>{money(guide.cashCapacity, true)}</dd></div>
           <div><dt>Starting allowance · lower of the two</dt><dd>{money(guide.monthlyAllowance, true)}</dd></div>
         </dl>
-        <p>The full savings balance of {money(guide.reservedCash)} plus three times recent monthly spending of {money(guide.recentMonthlySpend)} stays protected. Investments, savings transfers, card payments, and internal transfers do not count as lifestyle spending. Future income waits until it posts.</p>
+        <p>Your tax reserve of {money(data.taxReserve.balance)} is already excluded from cash available to this guide. The remaining savings balance of {money(guide.reservedCash)} plus three times recent monthly spending of {money(guide.recentMonthlySpend)} stays protected. Investments, savings transfers, card payments, and internal transfers do not count as lifestyle spending. Future income waits until it posts.</p>
       </details>
     </article>
   );

@@ -3,6 +3,8 @@ import { getNetWorth, isFreshObservation, matchInternalTransfers } from "@/lib/a
 import { getCoinbasePortfolio } from "@/lib/coinbase";
 import { execute, queryRows } from "@/lib/db";
 import { getKrakenPortfolio } from "@/lib/kraken";
+import { buildReserveAwareCashHistory, getReserveAwareCash, resolveTaxReserve, taxReserveScopeKey } from "@/lib/tax-reserve";
+import { taxEstimateInputSchema, type TaxEstimateInput } from "@/lib/tax-estimate";
 
 type AccountRow = {
   account_id: string;
@@ -37,6 +39,7 @@ type TransactionRow = {
   category_primary: string | null;
   category_detailed: string | null;
   user_category: string | null;
+  currency: string;
 };
 
 type RuleRow = { merchant_key: string; category: string };
@@ -142,7 +145,7 @@ function isHiddenHolding(name: string) {
 }
 
 export async function getDashboardData() {
-  const [accounts, transactionRows, items, categoryRules, holdingRows, coinbasePortfolio, krakenPortfolio] = await Promise.all([
+  const [accounts, transactionRows, items, categoryRules, holdingRows, coinbasePortfolio, krakenPortfolio, taxSettings] = await Promise.all([
     queryRows<AccountRow>(`
       SELECT a.*, i.institution_name, l.minimum_payment, l.next_payment_due_date
       FROM accounts a
@@ -180,6 +183,10 @@ export async function getDashboardData() {
     `),
     getCoinbasePortfolio(),
     getKrakenPortfolio(),
+    queryRows<{ key: string; value: string }>(
+      "SELECT key, value FROM app_settings WHERE key IN (?, ?)",
+      ["tax_account_ids", "tax_scenario_2026"],
+    ),
   ]);
 
   const rules = new Map(categoryRules.map((rule) => [rule.merchant_key, rule.category]));
@@ -210,6 +217,30 @@ export async function getDashboardData() {
   });
 
   const now = new Date();
+  const settings = new Map(taxSettings.map((setting) => [setting.key, setting.value]));
+  const reserveAccounts = accounts.map((account) => ({
+    id: account.account_id,
+    name: account.name,
+    type: account.type,
+    subtype: account.subtype,
+    currentBalance: account.current_balance === null ? null : Number(account.current_balance),
+    currency: account.currency,
+  }));
+  const reserve = resolveTaxReserve(reserveAccounts, settings.get("tax_account_ids"));
+  const taxAccountIds = new Set(reserve.accountIds);
+  const reserveRows = accounts.filter((account) => taxAccountIds.has(account.account_id));
+  const reserveItemIds = new Set(reserveRows.map((account) => account.item_id));
+  const taxReserve = {
+    ...reserve,
+    reliable: reserve.missingBalances === 0 && reserve.unsupportedCurrencies === 0 && !reserve.invalidSetting &&
+      reserveRows.every((account) => isFreshObservation(account.updated_at, now)) &&
+      items.filter((item) => reserveItemIds.has(item.item_id)).every((item) => item.status === "healthy"),
+  };
+  let taxScenario: TaxEstimateInput | null = null;
+  try {
+    const parsed = taxEstimateInputSchema.safeParse(JSON.parse(settings.get("tax_scenario_2026") ?? "null"));
+    if (parsed.success) taxScenario = parsed.data;
+  } catch { /* A missing or malformed saved scenario must not break the dashboard. */ }
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
   const previousMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().slice(0, 10);
   const currentMonth = classified.filter((transaction) => transaction.transaction_date >= monthStart && !transaction.pending);
@@ -270,14 +301,10 @@ export async function getDashboardData() {
     );
   }
 
-  const totalCash = accounts
-    .filter((account) => account.type === "depository")
-    .reduce((total, account) => total + (Number(account.current_balance) || 0), 0);
-  const reservedCash = accounts
-    .filter((account) => account.type === "depository" && account.subtype === "savings")
-    .reduce((total, account) => total + (Number(account.current_balance) || 0), 0);
+  const { totalCash, grossCash, nonTaxSavings: reservedCash } = getReserveAwareCash(reserveAccounts, reserve.accountIds);
   const recentMonthlySpend = Math.max(monthSpend, previousMonthSpend);
-  const protectedCash = Math.min(totalCash, reservedCash + recentMonthlySpend * 3);
+  // Tax funds are already outside totalCash. Protect only the remaining savings here.
+  const protectedCash = Math.max(0, Math.min(totalCash, reservedCash + recentMonthlySpend * 3));
   const postReserveIncome = Math.max(0, monthIncome - monthSaved);
   const incomeAllowance = postReserveIncome > 0
     ? postReserveIncome * 0.1
@@ -358,54 +385,20 @@ export async function getDashboardData() {
     );
   }
 
-  const depositoryTransactions = classified.filter(
-    (transaction) => transaction.account_type === "depository" && !transaction.pending,
+  const cashTrendData = buildReserveAwareCashHistory(
+    totalCash,
+    classified.map((transaction) => ({
+      accountId: transaction.account_id,
+      accountType: transaction.account_type,
+      date: transaction.transaction_date,
+      amount: Number(transaction.amount),
+      pending: Boolean(transaction.pending),
+      currency: transaction.currency,
+    })),
+    taxReserve.accountIds,
+    now,
+    reserveAccounts.filter((account) => !account.currency || account.currency === "USD"),
   );
-  const earliestImportedDay = depositoryTransactions
-    .map((transaction) => transaction.transaction_date)
-    .sort()[0];
-  const maximumHistoryStart = new Date(now);
-  maximumHistoryStart.setDate(now.getDate() - 179);
-  const minimumHistoryStart = new Date(now);
-  minimumHistoryStart.setDate(now.getDate() - 29);
-  const importedHistoryStart = earliestImportedDay
-    ? new Date(`${earliestImportedDay}T12:00:00`)
-    : minimumHistoryStart;
-  const historyStart = new Date(
-    Math.min(
-      minimumHistoryStart.getTime(),
-      Math.max(maximumHistoryStart.getTime(), importedHistoryStart.getTime()),
-    ),
-  );
-  const historyDays = Math.round(
-    (new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() -
-      new Date(historyStart.getFullYear(), historyStart.getMonth(), historyStart.getDate()).getTime()) /
-      86_400_000,
-  ) + 1;
-  const cashTransactions = classified.filter(
-    (transaction) =>
-      transaction.account_type === "depository" &&
-      !transaction.pending &&
-      transaction.transaction_date >= historyStart.toISOString().slice(0, 10),
-  );
-  const cashTrendData = Array.from({ length: historyDays }, (_, index) => {
-    const date = new Date(historyStart);
-    date.setDate(historyStart.getDate() + index);
-    const day = date.toISOString().slice(0, 10);
-    const futureMovement = cashTransactions
-      .filter((transaction) => transaction.transaction_date > day)
-      .reduce((sum, transaction) => sum + transaction.amount, 0);
-    const dailyNetMovement = cashTransactions
-      .filter((transaction) => transaction.transaction_date === day)
-      .reduce((sum, transaction) => sum + transaction.amount, 0);
-    return {
-      day,
-      date: date.toLocaleDateString("en-US", { month: "short", day: "numeric" }),
-      balance: round(totalCash + futureMovement),
-      cashIn: round(Math.max(0, -dailyNetMovement)),
-      cashOut: round(Math.max(0, dailyNetMovement)),
-    };
-  });
 
   // Account balances already contain their holdings. Use full balances and raw
   // exchange holdings here, including assets omitted from the display table.
@@ -430,6 +423,8 @@ export async function getDashboardData() {
     ],
   );
   const hasObservedBalances = accounts.length > 0 || coinbasePortfolio.holdings.length > 0 || krakenPortfolio.holdings.length > 0;
+  const netWorthAfterTaxReserve = round(netWorth.netWorth - taxReserve.balance);
+  const adjustedSnapshotScope = taxReserveScopeKey(taxReserve.accountIds);
   const contributingItemIds = new Set(accounts.map((account) => account.item_id));
   const balancesReliable = hasObservedBalances && netWorth.missingBalances === 0 && netWorth.unsupportedCurrencies === 0
     && items.filter((item) => contributingItemIds.has(item.item_id)).every((item) => item.status === "healthy")
@@ -445,27 +440,56 @@ export async function getDashboardData() {
          net_worth = excluded.net_worth, recorded_at = CURRENT_TIMESTAMP`,
       [now.toISOString().slice(0, 10), netWorth.assets, netWorth.liabilities, netWorth.netWorth],
     );
+    if (taxReserve.reliable) {
+      await execute(
+        `INSERT INTO tax_reserve_net_worth_snapshots (scope_key, snapshot_date, assets, liabilities, net_worth, tax_reserve)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(scope_key, snapshot_date) DO UPDATE SET
+           assets = excluded.assets, liabilities = excluded.liabilities,
+           net_worth = excluded.net_worth, tax_reserve = excluded.tax_reserve,
+           recorded_at = CURRENT_TIMESTAMP`,
+        [adjustedSnapshotScope, now.toISOString().slice(0, 10), round(netWorth.assets - taxReserve.balance), netWorth.liabilities, netWorthAfterTaxReserve, taxReserve.balance],
+      );
+    }
   }
-  const snapshots = await queryRows<{ snapshot_date: string; assets: number; liabilities: number; net_worth: number }>(
-    "SELECT snapshot_date, assets, liabilities, net_worth FROM net_worth_snapshots ORDER BY snapshot_date",
-  );
+  const [snapshots, adjustedSnapshots] = await Promise.all([
+    queryRows<{ snapshot_date: string; assets: number; liabilities: number; net_worth: number }>(
+      "SELECT snapshot_date, assets, liabilities, net_worth FROM net_worth_snapshots ORDER BY snapshot_date",
+    ),
+    queryRows<{ snapshot_date: string; assets: number; liabilities: number; net_worth: number; tax_reserve: number }>(
+      "SELECT snapshot_date, assets, liabilities, net_worth, tax_reserve FROM tax_reserve_net_worth_snapshots WHERE scope_key = ? ORDER BY snapshot_date",
+      [adjustedSnapshotScope],
+    ),
+  ]);
 
   return {
     generatedAt: now.toISOString(),
+    taxReserve,
+    taxScenario,
     netWorth,
-    netWorthReliable: balancesReliable,
+    netWorthAfterTaxReserve,
+    netWorthReliable: balancesReliable && taxReserve.reliable,
     netWorthHistory: snapshots.map((snapshot) => ({
       date: snapshot.snapshot_date,
       assets: Number(snapshot.assets),
       liabilities: Number(snapshot.liabilities),
       netWorth: Number(snapshot.net_worth),
     })),
+    netWorthAfterTaxReserveHistory: adjustedSnapshots.map((snapshot) => ({
+      date: snapshot.snapshot_date,
+      assets: Number(snapshot.assets),
+      liabilities: Number(snapshot.liabilities),
+      netWorth: Number(snapshot.net_worth),
+      taxReserve: Number(snapshot.tax_reserve),
+    })),
     totalCash: round(totalCash),
+    grossCash: round(grossCash),
     accounts: accounts.map((account) => {
       const pendingOutflow = round(pendingByAccount.get(account.account_id) ?? 0);
       const currentBalance = account.current_balance === null ? null : Number(account.current_balance);
       return {
         id: account.account_id,
+        isTaxReserve: taxAccountIds.has(account.account_id),
         institutionName: account.institution_name,
         name: account.name,
         mask: account.mask,

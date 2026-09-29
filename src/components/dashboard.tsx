@@ -9,6 +9,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { UserButton } from "@clerk/nextjs";
+import { useRouter } from "next/navigation";
 import {
   Activity,
   ArrowDownLeft,
@@ -29,6 +30,7 @@ import {
   Menu,
   Search,
   ShieldCheck,
+  ReceiptText,
   Sparkles,
   TrendingUp,
   Wallet,
@@ -48,6 +50,7 @@ import {
   InvestmentConsentButton,
 } from "./finance/connections";
 import { AdvisorView } from "./finance/advisor";
+import { TaxesView } from "./finance/taxes";
 import {
   BalanceChart,
   Breakdown,
@@ -113,6 +116,12 @@ const navigation = [
     description: "Your financial life, connected.",
   },
   {
+    id: "taxes",
+    label: "Taxes",
+    icon: ReceiptText,
+    description: "Money set aside. A clearer picture of what’s yours to use.",
+  },
+  {
     id: "advisor",
     label: "Money advisor",
     icon: Sparkles,
@@ -151,6 +160,7 @@ export function Dashboard({
   initialData: DashboardData;
   environment: "sandbox" | "production";
 }) {
+  const router = useRouter();
   const view = useSyncExternalStore(
     subscribeView,
     readView,
@@ -224,7 +234,7 @@ export function Dashboard({
   const latestSync = data.items
     .map((x) => timestamp(x.updatedAt))
     .sort((a, b) => b.getTime() - a.getTime())[0];
-  const periodRelevant = !["accounts", "investments", "advisor"].includes(view);
+  const periodRelevant = !["accounts", "investments", "advisor", "taxes"].includes(view);
   function drill(name: string) {
     setCategory(name);
     window.location.hash = "transactions";
@@ -284,11 +294,11 @@ export function Dashboard({
         </div>
         <div className="nav-caption">YOUR MONEY</div>
         <nav aria-label="Main navigation">
-          {navigation.map((item, i) => (
+          {navigation.map((item) => (
             <a
               href={`#${item.id}`}
               key={item.id}
-              className={`nav-item ${view === item.id ? "active" : ""} ${i === 7 ? "advisor-nav" : ""}`}
+              className={`nav-item ${view === item.id ? "active" : ""} ${item.id === "advisor" ? "advisor-nav" : ""}`}
               aria-current={view === item.id ? "page" : undefined}
               onClick={() => {
                 setMobileOpen(false);
@@ -301,7 +311,7 @@ export function Dashboard({
               {item.id === "accounts" && problems > 0 && (
                 <b className="warning-count">{problems}</b>
               )}
-              {i === 7 && <span className="new-label">AI</span>}
+              {item.id === "advisor" && <span className="new-label">AI</span>}
             </a>
           ))}
         </nav>
@@ -475,7 +485,6 @@ export function Dashboard({
             <Overview
               data={data}
               analytics={analytics}
-              worth={worth}
               range={range}
               drill={drill}
             />
@@ -506,6 +515,7 @@ export function Dashboard({
           )}
           {view === "investments" && <Investments data={data} />}
           {view === "accounts" && <Accounts data={data} />}
+          {view === "taxes" && <TaxesView data={data} onRefresh={() => router.refresh()} />}
           <PreservedView mode={view === "advisor" ? "visible" : "hidden"}>
             <AdvisorView data={data} />
           </PreservedView>
@@ -549,13 +559,11 @@ type Range = ReturnType<typeof getDateRange>;
 function Overview({
   data,
   analytics: a,
-  worth,
   range,
   drill,
 }: {
   data: DashboardData;
   analytics: Analytics;
-  worth: Worth;
   range: Range;
   drill: (name: string) => void;
 }) {
@@ -568,17 +576,17 @@ function Overview({
     <div className="view-stack">
       <div className="metrics-grid">
         <Metric
-          label="Connected net worth"
-          value={money(worth.netWorth)}
+          label="Net worth after tax reserve"
+          value={money(data.netWorthAfterTaxReserve)}
           note={
             data.netWorthReliable
-              ? "Assets minus liabilities"
+              ? `${money(data.taxReserve.balance)} reserved for taxes`
               : "Available balances · may be incomplete"
           }
           icon={<ChartNoAxesCombined size={17} />}
         />
         <Metric
-          label="Income"
+          label="Income before tax set-asides"
           value={money(a.totals.income)}
           note={
             <Change value={a.incomeChange} suffix={range.comparisonLabel} />
@@ -600,7 +608,7 @@ function Overview({
         <Metric
           label="Net cash flow"
           value={money(a.totals.net)}
-          note="Income + refunds − spending (incl. taxes)"
+          note="Before savings, investments & tax set-asides"
           tone={a.totals.net >= 0 ? "positive" : "negative"}
           icon={<Activity size={17} />}
         />
@@ -609,18 +617,23 @@ function Overview({
         <section className="panel cash-hero">
           <PanelHeader
             title="A clearer view of your cash"
-            subtitle="Your connected checking and savings accounts"
+            subtitle="Checking and savings, excluding your tax reserve"
           >
-            <span className="badge soft-green">Cash balance</span>
+            <span className="badge soft-green">Outside tax reserve</span>
           </PanelHeader>
           <div className="hero-number">
             {money(data.totalCash, true)}
-            <span>current balance</span>
+            <span>cash outside tax reserve</span>
+          </div>
+          <div className="cash-reconciliation">
+            <span>All cash <b>{money(data.grossCash, true)}</b></span>
+            <span>Tax reserve <b>−{money(data.taxReserve.balance, true)}</b></span>
+            <ViewLink href="#taxes">Manage reserve</ViewLink>
           </div>
           <BalanceChart data={cashHistory} />
           <div className="chart-footnote">
             <i />
-            Balance history reconstructed from imported bank activity.
+            Outside-reserve balances reconstructed from imported bank activity.
           </div>
         </section>
         <section className="panel spending-overview">
@@ -759,7 +772,7 @@ function CashFlow({
     <div className="view-stack">
       <div className="metrics-grid">
         <Metric
-          label="Income"
+          label="Income before tax set-asides"
           value={money(a.totals.income)}
           note={
             <Change value={a.incomeChange} suffix={range.comparisonLabel} />
@@ -773,7 +786,7 @@ function CashFlow({
         <Metric
           label="Net cash flow"
           value={money(a.totals.net)}
-          note="Before savings and investments"
+          note="Before savings, investments & tax set-asides"
           tone={a.totals.net >= 0 ? "positive" : "negative"}
         />
         <Metric
@@ -819,7 +832,7 @@ function CashFlow({
               { name: "Spending before taxes", value: -spendingBeforeTax },
               { name: "Taxes", value: -a.totals.taxes },
               { name: "Invested", value: -a.totals.invested },
-              { name: "Moved to savings", value: -a.totals.saved },
+              { name: "Moved to savings / tax reserve", value: -a.totals.saved },
               { name: "Remaining after allocations", value: remaining },
             ].map((x) => (
               <div key={x.name}>
@@ -838,7 +851,8 @@ function CashFlow({
         )}
         <p className="panel-note">
           Posted transactions only. Transfers and card payments are excluded to
-          avoid counting the same money twice. Balance funding shows outflows
+          avoid counting the same money twice. Moving money into the tax reserve
+          does not reduce income or count as a tax payment. Balance funding shows outflows
           above income and refunds.
         </p>
       </section>
@@ -1023,24 +1037,28 @@ function NetWorth({
   const [chart, setChart] = useState<"netWorth" | "assets" | "liabilities">(
     "netWorth",
   );
-  const history = data.netWorthHistory.filter(
+  const history = data.netWorthAfterTaxReserveHistory.filter(
     (x) => x.date >= range.start && x.date <= range.end,
   );
+  const assetsAfterReserve = Math.max(0, w.assets - data.taxReserve.balance);
+  const allocation = w.allocation.map((entry) => entry.name === "Cash"
+    ? { ...entry, name: "Cash outside tax reserve", value: Math.max(0, entry.value - data.taxReserve.balance) }
+    : entry).filter((entry) => entry.value > 0);
   return (
     <div className="view-stack">
       <div className="metrics-grid">
         <Metric
-          label="Connected net worth"
-          value={money(w.netWorth, true)}
+          label="Net worth after tax reserve"
+          value={money(data.netWorthAfterTaxReserve)}
           note={
             data.netWorthReliable
-              ? "Latest connected balances"
+              ? "Assets − liabilities − tax reserve"
               : "Available balances · may be incomplete"
           }
         />
         <Metric
-          label="Total assets"
-          value={money(w.assets)}
+          label="Assets outside tax reserve"
+          value={money(assetsAfterReserve)}
           note="Cash, investments, crypto & other assets"
           tone="positive"
         />
@@ -1050,27 +1068,23 @@ function NetWorth({
           note="Card balances, loans & overdrafts"
         />
         <Metric
-          label="Tracked accounts"
-          value={data.accounts.length}
-          note={
-            w.missingBalances || w.unsupportedCurrencies
-              ? `${w.missingBalances} unavailable · ${w.unsupportedCurrencies} non-USD excluded`
-              : "Plus connected crypto portfolios"
-          }
+          label="Tax reserve"
+          value={money(data.taxReserve.balance)}
+          note={<a className="text-link" href="#taxes">Manage reserve <ArrowRight size={13} /></a>}
         />
       </div>
       <section className="panel">
         <PanelHeader
           title="The bigger picture"
-          subtitle="Actual recorded snapshots of your connected net worth"
+          subtitle="Recorded balances after setting aside your tax reserve"
         >
           <Segments
             value={chart}
             onChange={setChart}
             label="Net worth chart metric"
             options={[
-              { value: "netWorth", label: "Net worth" },
-              { value: "assets", label: "Assets" },
+              { value: "netWorth", label: "After reserve" },
+              { value: "assets", label: "Assets after reserve" },
               { value: "liabilities", label: "Liabilities" },
             ]}
           />
@@ -1079,7 +1093,7 @@ function NetWorth({
           <BalanceChart
             data={history.map((x) => ({ ...x, date: shortDate(x.date) }))}
             dataKey={chart}
-            label={chart === "netWorth" ? "Net worth" : chart}
+            label={chart === "netWorth" ? "Net worth after tax reserve" : chart === "assets" ? "Assets after tax reserve" : "Liabilities"}
           />
         ) : (
           <div className="history-start">
@@ -1088,7 +1102,7 @@ function NetWorth({
             </div>
             <h3>A new chapter starts here.</h3>
             <p>
-              Your current net worth is {money(w.netWorth)}. Daily balance
+              Your current net worth after tax reserve is {money(data.netWorthAfterTaxReserve)}. Daily balance
               snapshots will build your history from here, without guessing at
               past market values.
             </p>
@@ -1102,19 +1116,25 @@ function NetWorth({
         <p className="panel-note">
           Connected assets only. Account balances can update at different times.
           No property or other unconnected assets are included. Historical
-          snapshots reflect the accounts connected at the time.
+          snapshots use the reserve balance recorded on each date. History starts
+          fresh when you change which accounts are reserved for taxes.
         </p>
+        <div className="cash-reconciliation net-worth-reconciliation">
+          <span>Full connected net worth <b>{money(w.netWorth, true)}</b></span>
+          <span>Less tax reserve <b>{money(data.taxReserve.balance, true)}</b></span>
+          <span>After reserve <b>{money(data.netWorthAfterTaxReserve, true)}</b></span>
+        </div>
       </section>
       <div className="two-columns">
         <section className="panel">
           <PanelHeader
-            title="What you own"
-            subtitle="How your connected assets are distributed"
+            title="Assets outside your tax reserve"
+            subtitle="Your reserve is tracked separately in Taxes"
           />
           <div className="asset-donut">
-            <Donut data={w.allocation} total={w.assets} label="Total assets" />
+            <Donut data={allocation} total={assetsAfterReserve} label="After tax reserve" />
           </div>
-          <Breakdown data={w.allocation} />
+          <Breakdown data={allocation} />
         </section>
         <section className="panel">
           <PanelHeader
@@ -1377,7 +1397,7 @@ function AccountRows({
               )}
             </span>
             <div className="account-detail">
-              <strong>{a.name}</strong>
+              <strong>{a.name}{a.isTaxReserve && <span className="badge tax-reserve-badge">Tax reserve</span>}</strong>
               <span>
                 {a.institutionName}
                 {a.mask ? ` ··${a.mask}` : ""}
@@ -1409,9 +1429,9 @@ function Accounts({ data }: { data: DashboardData }) {
     <div className="view-stack">
       <div className="metrics-grid">
         <Metric
-          label="Cash accounts"
+          label="Cash outside tax reserve"
           value={money(data.totalCash)}
-          note={`${data.accounts.filter((x) => x.type === "depository").length} connected accounts`}
+          note={`${money(data.taxReserve.balance)} separately reserved for taxes`}
         />
         <Metric
           label="Credit card balances"

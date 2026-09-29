@@ -120,6 +120,7 @@ export async function ensureSchema() {
           `CREATE TABLE IF NOT EXISTS advisor_insights (
             insight_date TEXT PRIMARY KEY,
             content TEXT NOT NULL,
+            context_key TEXT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
           )`,
@@ -135,6 +136,16 @@ export async function ensureSchema() {
             net_worth REAL NOT NULL,
             recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
           )`,
+          `CREATE TABLE IF NOT EXISTS tax_reserve_net_worth_snapshots (
+            scope_key TEXT NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            assets REAL NOT NULL,
+            liabilities REAL NOT NULL,
+            net_worth REAL NOT NULL,
+            tax_reserve REAL NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (scope_key, snapshot_date)
+          )`,
         ],
         "write",
       );
@@ -147,6 +158,10 @@ export async function ensureSchema() {
       ].filter(([name]) => !names.has(name));
       for (const [name, type] of migrations) {
         await database.execute(`ALTER TABLE transactions ADD COLUMN ${name} ${type}`);
+      }
+      const insightColumns = await database.execute("PRAGMA table_info(advisor_insights)");
+      if (!insightColumns.rows.some((row) => row.name === "context_key")) {
+        await database.execute("ALTER TABLE advisor_insights ADD COLUMN context_key TEXT");
       }
     })();
   }
