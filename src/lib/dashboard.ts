@@ -1,10 +1,12 @@
 import { automaticSpendingCategory, merchantKey } from "@/lib/categories";
+import { getNetWorth, isFreshObservation, matchInternalTransfers } from "@/lib/analytics";
 import { getCoinbasePortfolio } from "@/lib/coinbase";
-import { queryRows } from "@/lib/db";
+import { execute, queryRows } from "@/lib/db";
 import { getKrakenPortfolio } from "@/lib/kraken";
 
 type AccountRow = {
   account_id: string;
+  item_id: string;
   institution_name: string;
   name: string;
   mask: string | null;
@@ -15,6 +17,8 @@ type AccountRow = {
   credit_limit: number | null;
   minimum_payment: number | null;
   next_payment_due_date: string | null;
+  currency: string;
+  updated_at: string;
 };
 
 type TransactionRow = {
@@ -24,6 +28,7 @@ type TransactionRow = {
   account_name: string;
   account_mask: string | null;
   account_type: string;
+  account_subtype: string | null;
   transaction_date: string;
   name: string;
   merchant_name: string | null;
@@ -51,6 +56,7 @@ type HoldingRow = {
   cost_basis: number | null;
   unofficial_currency_code: string | null;
   update_datetime: string | null;
+  currency: string | null;
 };
 
 export type FlowType =
@@ -86,47 +92,8 @@ const flowCategories: Record<Exclude<FlowType, "spending">, string> = {
   taxes: "Taxes",
 };
 
-function daysBetween(a: string, b: string) {
-  return Math.abs(
-    (new Date(`${a}T12:00:00`).getTime() - new Date(`${b}T12:00:00`).getTime()) /
-      86_400_000,
-  );
-}
-
 function matchedTransfers(rows: TransactionRow[]) {
-  const matches = new Map<string, Classification>();
-  const usedInflows = new Set<string>();
-  const inflows = rows.filter((row) => row.amount < 0);
-
-  for (const outflow of rows.filter((row) => row.amount > 0)) {
-    const inflow = inflows.find(
-      (candidate) =>
-        !usedInflows.has(candidate.transaction_id) &&
-        candidate.account_id !== outflow.account_id &&
-        (candidate.category_primary === "TRANSFER_IN" ||
-          ["TRANSFER_OUT", "GOVERNMENT_AND_NON_PROFIT", "LOAN_PAYMENTS"].includes(
-            outflow.category_primary ?? "",
-          ) ||
-          candidate.account_type === "credit" ||
-          outflow.account_type === "credit") &&
-        Math.abs(Math.abs(candidate.amount) - outflow.amount) < 0.01 &&
-        daysBetween(candidate.transaction_date, outflow.transaction_date) <= 3,
-    );
-    if (!inflow) continue;
-
-    usedInflows.add(inflow.transaction_id);
-    const accountNames = `${outflow.account_name} ${inflow.account_name}`;
-    let flowType: FlowType = "transfer";
-    if (outflow.account_type === "credit" || inflow.account_type === "credit") {
-      flowType = "credit_payment";
-    } else if (/irs|tax|saving/i.test(accountNames)) {
-      flowType = "savings";
-    }
-    const classification = { flowType, flowLabel: flowLabels[flowType] };
-    matches.set(outflow.transaction_id, classification);
-    matches.set(inflow.transaction_id, classification);
-  }
-  return matches;
+  return new Map([...matchInternalTransfers(rows)].map(([id, flowType]) => [id, { flowType, flowLabel: flowLabels[flowType] }]));
 }
 
 function classifyTransaction(row: TransactionRow, matches: Map<string, Classification>) {
@@ -142,9 +109,13 @@ function classifyTransaction(row: TransactionRow, matches: Map<string, Classific
     else if (row.category_primary === "TRANSFER_IN") flowType = "transfer";
     else flowType = "refund";
   } else if (row.category_primary === "LOAN_PAYMENTS") {
-    flowType = "credit_payment";
+    // Mortgage, auto and student-loan payments remain expenses. Only credit-card
+    // payments duplicate purchases already present in card transactions.
+    flowType = /CREDIT_CARD/.test(detail) || /credit card|card payment|cc payment/i.test(description)
+      ? "credit_payment"
+      : "spending";
   } else if (row.category_primary === "TRANSFER_OUT") {
-    flowType = /coinbase|crypto|wire withdrawal/i.test(`${description} ${detail}`)
+    flowType = /coinbase|kraken|crypto|wire withdrawal/i.test(`${description} ${detail}`)
       ? "investment"
       : "transfer";
   } else if (row.category_primary === "GOVERNMENT_AND_NON_PROFIT") {
@@ -181,12 +152,11 @@ export async function getDashboardData() {
     `),
     queryRows<TransactionRow>(`
       SELECT t.*, a.name AS account_name, a.mask AS account_mask,
-             a.type AS account_type, i.institution_name
+             a.type AS account_type, a.subtype AS account_subtype, i.institution_name
       FROM transactions t
       JOIN accounts a ON a.account_id = t.account_id
       JOIN plaid_items i ON i.item_id = a.item_id
       ORDER BY t.transaction_date DESC, t.updated_at DESC
-      LIMIT 2000
     `),
     queryRows<{
       item_id: string;
@@ -201,7 +171,7 @@ export async function getDashboardData() {
              h.security_id, s.name AS security_name, s.ticker_symbol,
              s.type AS security_type, s.subtype AS security_subtype,
              h.quantity, h.institution_price, h.institution_value,
-             h.cost_basis, h.unofficial_currency_code, s.update_datetime
+             h.cost_basis, h.unofficial_currency_code, h.currency, s.update_datetime
       FROM investment_holdings h
       JOIN investment_securities s ON s.security_id = h.security_id
       JOIN accounts a ON a.account_id = h.account_id
@@ -437,7 +407,59 @@ export async function getDashboardData() {
     };
   });
 
+  // Account balances already contain their holdings. Use full balances and raw
+  // exchange holdings here, including assets omitted from the display table.
+  const netWorth = getNetWorth(
+    accounts.map((account) => ({
+      id: account.account_id,
+      type: account.type,
+      institutionName: account.institution_name,
+      currentBalance: account.current_balance === null ? null : Number(account.current_balance),
+      currency: account.currency,
+    })),
+    [
+      ...holdingRows.map((holding) => ({
+        accountId: holding.account_id,
+        institutionName: holding.institution_name,
+        value: Number(holding.institution_value),
+        type: holding.security_type,
+        currency: holding.currency,
+      })),
+      ...coinbasePortfolio.holdings,
+      ...krakenPortfolio.holdings,
+    ],
+  );
+  const hasObservedBalances = accounts.length > 0 || coinbasePortfolio.holdings.length > 0 || krakenPortfolio.holdings.length > 0;
+  const contributingItemIds = new Set(accounts.map((account) => account.item_id));
+  const balancesReliable = hasObservedBalances && netWorth.missingBalances === 0 && netWorth.unsupportedCurrencies === 0
+    && items.filter((item) => contributingItemIds.has(item.item_id)).every((item) => item.status === "healthy")
+    && accounts.every((account) => isFreshObservation(account.updated_at, now))
+    && (!coinbasePortfolio.configured || (coinbasePortfolio.status === "connected" && isFreshObservation(coinbasePortfolio.updatedAt, now)))
+    && (!krakenPortfolio.configured || (krakenPortfolio.status === "connected" && isFreshObservation(krakenPortfolio.updatedAt, now)));
+  if (balancesReliable) {
+    await execute(
+      `INSERT INTO net_worth_snapshots (snapshot_date, assets, liabilities, net_worth)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(snapshot_date) DO UPDATE SET
+         assets = excluded.assets, liabilities = excluded.liabilities,
+         net_worth = excluded.net_worth, recorded_at = CURRENT_TIMESTAMP`,
+      [now.toISOString().slice(0, 10), netWorth.assets, netWorth.liabilities, netWorth.netWorth],
+    );
+  }
+  const snapshots = await queryRows<{ snapshot_date: string; assets: number; liabilities: number; net_worth: number }>(
+    "SELECT snapshot_date, assets, liabilities, net_worth FROM net_worth_snapshots ORDER BY snapshot_date",
+  );
+
   return {
+    generatedAt: now.toISOString(),
+    netWorth,
+    netWorthReliable: balancesReliable,
+    netWorthHistory: snapshots.map((snapshot) => ({
+      date: snapshot.snapshot_date,
+      assets: Number(snapshot.assets),
+      liabilities: Number(snapshot.liabilities),
+      netWorth: Number(snapshot.net_worth),
+    })),
     totalCash: round(totalCash),
     accounts: accounts.map((account) => {
       const pendingOutflow = round(pendingByAccount.get(account.account_id) ?? 0);
@@ -454,6 +476,8 @@ export async function getDashboardData() {
         creditLimit: account.credit_limit === null ? null : Number(account.credit_limit),
         minimumPayment: account.minimum_payment === null ? null : Number(account.minimum_payment),
         nextPaymentDueDate: account.next_payment_due_date,
+        currency: account.currency,
+        updatedAt: account.updated_at,
         pendingOutflow,
         estimatedBalance:
           account.type === "credit" && currentBalance !== null

@@ -128,6 +128,13 @@ export async function ensureSchema() {
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
           )`,
+          `CREATE TABLE IF NOT EXISTS net_worth_snapshots (
+            snapshot_date TEXT PRIMARY KEY,
+            assets REAL NOT NULL,
+            liabilities REAL NOT NULL,
+            net_worth REAL NOT NULL,
+            recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          )`,
         ],
         "write",
       );

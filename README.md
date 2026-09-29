@@ -2,6 +2,28 @@
 
 Your own personal finance dashboard: spending, income, account balances, investments, transaction categories, and an optional Claude-powered money assistant. Each person installs their own copy and connects their own accounts. No financial data or API keys come with this repository.
 
+## Finance workspace
+
+- **Overview:** connected net worth, income, spending, cash flow, recent activity, and account balances.
+- **Transactions:** merchant search, account/category/flow filters, pending and uncategorized views, sorting, pagination, CSV export, and editable categories with merchant learning.
+- **Cash flow:** an interactive flow diagram and income/outflow table, with monthly comparisons and category breakdowns.
+- **Spending:** category, group, and merchant analysis; monthly trends; and estimated recurring charges.
+- **Net worth:** assets, liabilities, allocation, and real recorded balance snapshots.
+- **Investments and accounts:** searchable holdings, institution allocation, connection health, and credit-card payment details.
+- **Money advisor:** the existing AI conversation and saved-insight workflow in the rebuilt interface.
+
+The shared period controls cover this month, last month, three months, year to date, and all imported history. Category breakdowns open the matching transaction view.
+
+## How the numbers work
+
+Spending includes posted expenses and taxes. Pending charges are shown separately. Internal transfers and card payments are reconciled across accounts before applying provider categories, so a transfer mislabeled as income or a move to a tax-reserve account is not counted as income or spending. Ordinary loan payments remain expenses. Net cash flow is income plus refunds minus spending; savings and investment transfers appear separately as allocations.
+
+Net worth uses full connected account balances, subtracts credit/loan liabilities and overdrafts, and adds independent exchange holdings once. Investment holdings are not added on top of their parent account balance. If an investment balance is missing, its reported holdings can supply its value. Non-USD account balances are excluded rather than converted with an invented exchange rate. The portfolio holdings table preserves the existing small-position and hidden-holding filters; net worth uses the full available balances.
+
+Snapshots are saved when the dashboard is loaded, at most one updated observation per UTC day. They are saved only when contributing bank connections are healthy, available observations are no more than 48 hours old, and configured crypto providers respond successfully. Missing, unsupported, stale, or failed sources block a new snapshot and are disclosed in the interface. There is no historical backfill or background scheduler; charts grow as the app records new observations. Changes to connected accounts can change net worth independently of investment performance. Exchange assets for which the existing provider adapters cannot obtain a USD quote may be omitted.
+
+Cash-balance history is explicitly labeled as a reconstruction from imported bank activity, not recorded net-worth history. Recurring charges require several similar, regularly spaced payments and remain estimates. Prior-period comparisons require earlier imported history; providers can still have gaps in their coverage.
+
 ## Let Claude Code set it up
 
 Give Claude Code this message:
@@ -60,7 +82,7 @@ Plaid handles bank linking. Exchange integrations call the exchanges. If you ena
 
 The supported beginner path is **`npm run dev` on your own computer**, bound to `127.0.0.1`. Local development intentionally skips login. Do not expose this server through a tunnel, public IP, or `0.0.0.0`.
 
-The source also includes an advanced hosted path using Clerk and Turso, but hosting is not part of the quick start. `npm run build` / `npm start` use production authentication and require Clerk configuration. Each installation is single-owner; the earliest Clerk user claims that installation. A friend needs a separate installation, database, and Clerk application. A hosted deployment needs persistent storage, authentication validation, protected credentials, and a separate security review before real data is connected. No deployment or automatic paid daily cron is configured here. `CRON_SECRET` protects the optional daily-analysis endpoint; leave it unset when unused. Turso uses the same remote database regardless of `PLAID_ENV`, so use separate databases if testing both environments remotely.
+The source also includes an advanced hosted path using Clerk and Turso, but hosting is not part of the quick start. `npm run build` / `npm start` use production authentication and require Clerk configuration. Each installation is single-owner; the earliest Clerk user claims that installation. A friend needs a separate installation, database, and Clerk application. A hosted deployment needs persistent storage, authentication validation, protected credentials, and a separate security review before real data is connected. The included Vercel configuration preserves the existing daily analysis schedule. Remove its `crons` entry before deploying a copy if you do not want automatic AI calls. `CRON_SECRET` protects the optional daily-analysis endpoint; leave it unset when unused. Turso uses the same remote database regardless of `PLAID_ENV`, so use separate databases if testing both environments remotely.
 
 ## Troubleshooting
 
@@ -73,8 +95,8 @@ The source also includes an advanced hosted path using Clerk and Turso, but host
 
 ## Development
 
-Next.js App Router, React, TypeScript, libSQL/SQLite, Plaid, and the Vercel AI SDK. Run `npm run lint` and `npm run build` after code changes. See `CLAUDE.md` for a code map and the guided installation workflow. This is personal software shared as-is, not a multi-user finance service.
+Next.js App Router, React, TypeScript, libSQL/SQLite, Plaid, and the Vercel AI SDK. Run `npm test`, `npm run lint`, and `npm run build` after code changes. Tests require Node 24 LTS. See `CLAUDE.md` for a code map and the guided installation workflow. This is personal software shared as-is, not a multi-user finance service.
 
 ## License
 
-[MIT](LICENSE). Third-party packages retain their own licenses.
+[MIT](LICENSE). Third-party packages and fonts retain their own licenses. The bundled FK Grotesk trial fonts are for personal use; see `src/app/fonts/fk-grotesk/License.txt`.

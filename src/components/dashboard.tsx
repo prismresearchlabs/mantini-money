@@ -1,768 +1,1576 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
-import { usePlaidLink } from "react-plaid-link";
+import {
+  Activity as PreservedView,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { UserButton } from "@clerk/nextjs";
-import type { PlaidLinkOnSuccessMetadata } from "react-plaid-link";
 import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import {
-  ArrowDownRight,
+  Activity,
+  ArrowDownLeft,
+  ArrowLeftRight,
+  ArrowRight,
   ArrowUpRight,
-  Bot,
-  Building2,
-  CreditCard,
+  CalendarDays,
+  ChartNoAxesCombined,
+  ChartPie,
+  Check,
   ChevronDown,
-  CircleGauge,
+  ChevronLeft,
+  ChevronRight,
+  CircleHelp,
+  CreditCard,
   Landmark,
-  Link2,
-  LoaderCircle,
-  RefreshCw,
+  LayoutDashboard,
+  Menu,
   Search,
-  Send,
+  ShieldCheck,
   Sparkles,
   TrendingUp,
-  WalletCards,
+  Wallet,
 } from "lucide-react";
-import { TRANSACTION_CATEGORIES } from "@/lib/categories";
-import type { FinanceAgentUIMessage } from "@/lib/ai/finance-agent";
+import {
+  analyzeTransactions,
+  detectRecurring,
+  getDateRange,
+  getPeriodAnchor,
+  isExpense,
+  transactionNeedsReview,
+  type DatePreset,
+} from "@/lib/analytics";
+import { TransactionsView } from "./finance/transactions";
+import {
+  ConnectionControls,
+  InvestmentConsentButton,
+} from "./finance/connections";
+import { AdvisorView } from "./finance/advisor";
+import {
+  BalanceChart,
+  Breakdown,
+  Donut,
+  FlowDiagram,
+  MonthlyChart,
+} from "./finance/charts";
+import {
+  Change,
+  type DashboardData,
+  Empty,
+  Metric,
+  money,
+  palette,
+  PanelHeader,
+  Segments,
+  shortDate,
+  timestamp,
+  ViewLink,
+} from "./finance/ui";
 
-type DashboardData = Awaited<ReturnType<typeof import("@/lib/dashboard").getDashboardData>>;
-type FlowType = DashboardData["transactions"][number]["flowType"];
-type AccountKind = "all" | "depository" | "credit";
-type DateRange = "month" | "three_months" | "all";
-
-function formatMoney(value: number | null, cents = false) {
-  if (value === null) return "—";
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: cents ? 2 : 0,
-  }).format(value);
+const navigation = [
+  {
+    id: "overview",
+    label: "Overview",
+    icon: LayoutDashboard,
+    description: "The big picture. All in one place.",
+  },
+  {
+    id: "transactions",
+    label: "Transactions",
+    icon: ArrowLeftRight,
+    description: "Every little detail, beautifully organized.",
+  },
+  {
+    id: "cash-flow",
+    label: "Cash flow",
+    icon: Activity,
+    description: "See where your money comes from. And where it goes.",
+  },
+  {
+    id: "spending",
+    label: "Spending",
+    icon: ChartPie,
+    description: "A little more clarity on your everyday spending.",
+  },
+  {
+    id: "net-worth",
+    label: "Net worth",
+    icon: ChartNoAxesCombined,
+    description: "Your whole financial picture, coming together.",
+  },
+  {
+    id: "investments",
+    label: "Investments",
+    icon: TrendingUp,
+    description: "Stocks, funds, and crypto. One connected portfolio.",
+  },
+  {
+    id: "accounts",
+    label: "Accounts",
+    icon: Landmark,
+    description: "Your financial life, connected.",
+  },
+  {
+    id: "advisor",
+    label: "Money advisor",
+    icon: Sparkles,
+    description: "Think through your next move with your actual numbers.",
+  },
+] as const;
+type View = (typeof navigation)[number]["id"];
+function subscribeView(callback: () => void) {
+  window.addEventListener("hashchange", callback);
+  return () => window.removeEventListener("hashchange", callback);
 }
-
-function formatCompactMoney(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    notation: "compact",
-    maximumFractionDigits: 0,
-  }).format(value);
+function readView(): View {
+  const hash = window.location.hash.slice(1).split("?")[0];
+  return navigation.find((x) => x.id === hash)?.id || "overview";
 }
-
-function parseStoredTimestamp(value: string) {
-  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)
-    ? `${value.replace(" ", "T")}Z`
-    : value;
-  return new Date(normalized);
+function subscribeSmallScreen(callback: () => void) {
+  const query = window.matchMedia("(max-width: 760px)");
+  query.addEventListener("change", callback);
+  return () => query.removeEventListener("change", callback);
 }
+function readSmallScreen() {
+  return window.matchMedia("(max-width: 760px)").matches;
+}
+const presets: { value: DatePreset; label: string }[] = [
+  { value: "month", label: "This month" },
+  { value: "last-month", label: "Last month" },
+  { value: "3-months", label: "Last 3 months" },
+  { value: "ytd", label: "Year to date" },
+  { value: "all", label: "All time" },
+];
 
-function ConnectionControls({ environment }: { environment: "sandbox" | "production" }) {
-  const router = useRouter();
-  const [linkToken, setLinkToken] = useState<string | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const openedToken = useRef<string | null>(null);
-
-  const onSuccess = useCallback(
-    async (publicToken: string | null, metadata: PlaidLinkOnSuccessMetadata) => {
-      if (!publicToken) return setStatus("Plaid did not return a token");
-      setBusy(true);
-      setStatus("Importing…");
-      const response = await fetch("/api/plaid/exchange-token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ publicToken, institution: metadata.institution }),
-      });
-      const result = await response.json();
-      setStatus(response.ok ? "Connected" : result.error || "Connection failed");
-      if (response.ok) router.refresh();
-      setBusy(false);
-      setLinkToken(null);
-    },
-    [router],
+export function Dashboard({
+  initialData: data,
+  environment,
+}: {
+  initialData: DashboardData;
+  environment: "sandbox" | "production";
+}) {
+  const view = useSyncExternalStore(
+    subscribeView,
+    readView,
+    () => "overview" as View,
   );
-
-  const { open, ready } = usePlaidLink({
-    token: linkToken,
-    onSuccess,
-    onExit: (error) => {
-      if (error) setStatus(error.display_message || error.error_message || "Link closed");
-      setLinkToken(null);
-    },
-  });
-
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    if (ready && linkToken && openedToken.current !== linkToken) {
-      openedToken.current = linkToken;
-      open();
-    }
-  }, [linkToken, open, ready]);
-
-  async function connect() {
-    setBusy(true);
-    const response = await fetch("/api/plaid/link-token", { method: "POST" });
-    const result = await response.json();
-    if (!response.ok) setStatus(result.error || "Unable to start Plaid");
-    else setLinkToken(result.linkToken);
-    setBusy(false);
+    window.scrollTo({ top: 0 });
+  }, [view]);
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const oldOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusables = () =>
+      Array.from(
+        sidebarRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), [tabindex="0"]',
+        ) || [],
+      );
+    focusables()[0]?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileOpen(false);
+      if (event.key !== "Tab") return;
+      const nodes = focusables();
+      if (event.shiftKey && document.activeElement === nodes[0]) {
+        event.preventDefault();
+        nodes.at(-1)?.focus();
+      } else if (!event.shiftKey && document.activeElement === nodes.at(-1)) {
+        event.preventDefault();
+        nodes[0]?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = oldOverflow;
+      document.removeEventListener("keydown", onKey);
+      previous?.focus();
+    };
+  }, [mobileOpen]);
+  const [preset, setPreset] = useState<DatePreset>("month");
+  const [offset, setOffset] = useState(0);
+  const [category, setCategory] = useState<string>();
+  const now = useMemo(() => new Date(data.generatedAt), [data.generatedAt]);
+  const anchor = useMemo(
+    () => getPeriodAnchor(preset, offset, now),
+    [preset, offset, now],
+  );
+  const range = useMemo(
+    () => getDateRange(preset, data.transactions, anchor),
+    [preset, data.transactions, anchor],
+  );
+  const analytics = useMemo(
+    () => analyzeTransactions(data.transactions, range),
+    [data.transactions, range],
+  );
+  const worth = data.netWorth;
+  const active = navigation.find((x) => x.id === view)!;
+  const problems =
+    data.items.filter((x) => x.status !== "healthy").length +
+    [data.portfolio.coinbase, data.portfolio.kraken].filter(
+      (x) => x.status === "error",
+    ).length;
+  const review = data.transactions.filter(transactionNeedsReview).length;
+  const connectionCount =
+    data.items.length +
+    [data.portfolio.coinbase, data.portfolio.kraken].filter((x) => x.configured)
+      .length;
+  const latestSync = data.items
+    .map((x) => timestamp(x.updatedAt))
+    .sort((a, b) => b.getTime() - a.getTime())[0];
+  const periodRelevant = !["accounts", "investments", "advisor"].includes(view);
+  function drill(name: string) {
+    setCategory(name);
+    window.location.hash = "transactions";
   }
-
-  async function sync() {
-    setBusy(true);
-    setStatus("Syncing…");
-    const response = await fetch("/api/plaid/sync", { method: "POST" });
-    const result = await response.json();
-    setStatus(response.ok ? "Up to date" : result.error || "Sync failed");
-    if (response.ok) router.refresh();
-    setBusy(false);
-  }
-
   return (
-    <div className="connection-controls">
-      <span className={`environment ${environment}`}>{environment}</span>
-      <button className="icon-button" onClick={sync} disabled={busy} aria-label="Sync accounts">
-        <RefreshCw size={16} className={busy ? "spin" : ""} />
-      </button>
-      <button className="button primary" onClick={connect} disabled={busy}>
-        <Link2 size={15} /> Add account
-      </button>
-      {status ? <span className="status-message">{status}</span> : null}
+    <div
+      className="app-shell"
+      onClickCapture={(event) => {
+        if ((event.target as Element).closest('a[href="#transactions"]'))
+          setCategory(undefined);
+      }}
+    >
+      <a
+        className="skip-link"
+        href="#main-content"
+        onClick={(event) => {
+          event.preventDefault();
+          mainRef.current?.focus();
+          mainRef.current?.scrollIntoView();
+        }}
+      >
+        Skip to content
+      </a>
+      {mobileOpen && (
+        <button
+          className="nav-overlay"
+          aria-label="Close navigation"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+      <aside
+        ref={sidebarRef}
+        className={`sidebar ${mobileOpen ? "open" : ""}`}
+        role={mobileOpen ? "dialog" : undefined}
+        aria-modal={mobileOpen || undefined}
+        aria-label="Workspace navigation"
+      >
+        <a
+          href="#overview"
+          className="brand"
+          onClick={() => setMobileOpen(false)}
+        >
+          <span className="brand-mark">
+            <ChartNoAxesCombined size={24} strokeWidth={1.8} />
+          </span>
+          <span>
+            Mantini<span className="brand-money"> money</span>
+          </span>
+        </a>
+        <div className="workspace-label">
+          <span className="workspace-avatar">NM</span>
+          <div>
+            <strong>Personal finances</strong>
+            <span>Your private workspace</span>
+          </div>
+          <ChevronDown size={14} />
+        </div>
+        <div className="nav-caption">YOUR MONEY</div>
+        <nav aria-label="Main navigation">
+          {navigation.map((item, i) => (
+            <a
+              href={`#${item.id}`}
+              key={item.id}
+              className={`nav-item ${view === item.id ? "active" : ""} ${i === 7 ? "advisor-nav" : ""}`}
+              aria-current={view === item.id ? "page" : undefined}
+              onClick={() => {
+                setMobileOpen(false);
+                if (item.id === "transactions") setCategory(undefined);
+              }}
+            >
+              <item.icon size={18} />
+              <span>{item.label}</span>
+              {item.id === "transactions" && review > 0 && <b>{review}</b>}
+              {item.id === "accounts" && problems > 0 && (
+                <b className="warning-count">{problems}</b>
+              )}
+              {i === 7 && <span className="new-label">AI</span>}
+            </a>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <div className="privacy-note">
+            <ShieldCheck size={17} />
+            <div>
+              <strong>Yours. And only yours.</strong>
+              <span>A private view of your money.</span>
+            </div>
+          </div>
+          <div className="profile-row">
+            <span className="profile-avatar">N</span>
+            <div>
+              <strong>Nicholas Mantini</strong>
+              <span>Personal account</span>
+            </div>
+            {process.env.NODE_ENV !== "development" && <UserButton />}
+          </div>
+        </div>
+      </aside>
+      <div className="workspace">
+        <header className="topbar">
+          <div className="topbar-breadcrumb">
+            <button
+              className="icon-btn mobile-menu"
+              aria-label="Open navigation"
+              onClick={() => setMobileOpen(true)}
+            >
+              <Menu size={20} />
+            </button>
+            <span className="breadcrumb-home">Personal workspace</span>
+            <span className="breadcrumb-separator">/</span>
+            <strong>{active.label}</strong>
+          </div>
+          <div className="topbar-right">
+            <a
+              href="#transactions"
+              className="icon-btn search-shortcut"
+              aria-label="Search transactions"
+              onClick={() => setCategory(undefined)}
+            >
+              <Search size={17} />
+            </a>
+            <span className={`sync-indicator ${problems ? "attention" : ""}`}>
+              <i />
+              {problems
+                ? `${problems} need attention`
+                : connectionCount
+                  ? "Connected"
+                  : "Not connected"}
+            </span>
+            <ConnectionControls environment={environment} />
+          </div>
+        </header>
+        <main
+          ref={mainRef}
+          tabIndex={-1}
+          id="main-content"
+          className="main-content"
+        >
+          <div className="page-heading">
+            <div>
+              <div className="eyebrow">
+                {view === "overview"
+                  ? "A LITTLE CLARITY, EVERY DAY"
+                  : "YOUR FINANCIAL PICTURE"}
+              </div>
+              <h1>
+                {view === "overview"
+                  ? "Your money, at a glance."
+                  : active.label}
+              </h1>
+              <p>{active.description}</p>
+            </div>
+            {periodRelevant && (
+              <div className="date-controls">
+                <div className="date-step">
+                  <button
+                    className="icon-btn"
+                    disabled={preset === "all"}
+                    aria-label="Previous period"
+                    onClick={() =>
+                      setOffset(
+                        (x) =>
+                          x -
+                          (preset === "3-months"
+                            ? 3
+                            : preset === "ytd"
+                              ? 12
+                              : 1),
+                      )
+                    }
+                  >
+                    <ChevronLeft size={16} />
+                  </button>
+                  <span>{range.label}</span>
+                  <button
+                    className="icon-btn"
+                    aria-label="Next period"
+                    disabled={offset >= 0 || preset === "all"}
+                    onClick={() =>
+                      setOffset((x) =>
+                        Math.min(
+                          0,
+                          x +
+                            (preset === "3-months"
+                              ? 3
+                              : preset === "ytd"
+                                ? 12
+                                : 1),
+                        ),
+                      )
+                    }
+                  >
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+                <label className="date-select">
+                  <CalendarDays size={15} />
+                  <select
+                    aria-label="Date range"
+                    value={preset}
+                    onChange={(e) => {
+                      setPreset(e.target.value as DatePreset);
+                      setOffset(0);
+                    }}
+                  >
+                    {presets.map((x) => (
+                      <option key={x.value} value={x.value}>
+                        {x.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            )}
+          </div>
+          {environment === "sandbox" && (
+            <div className="notice sandbox-notice">
+              <CircleHelp size={16} />
+              <span>
+                Sandbox workspace · These are test connections. Production
+                accounts remain separate.
+              </span>
+            </div>
+          )}
+          {problems > 0 && (
+            <a href="#accounts" className="notice attention-notice">
+              <CircleHelp size={16} />
+              <span>
+                {problems} connection{problems === 1 ? " needs" : "s need"}{" "}
+                attention. Some balances may be outdated.
+              </span>
+              <ArrowRight size={16} />
+            </a>
+          )}
+          {(view === "net-worth" || (view === "overview" && problems === 0)) &&
+            !data.netWorthReliable &&
+            connectionCount > 0 && (
+              <div className="notice attention-notice">
+                <CircleHelp size={16} />
+                <span>
+                  Some balances are unavailable, unsupported, or more than 48
+                  hours old. Net worth may be incomplete; a new snapshot will be
+                  saved after all connections are current.
+                </span>
+              </div>
+            )}
+          {view === "overview" && (
+            <Overview
+              data={data}
+              analytics={analytics}
+              worth={worth}
+              range={range}
+              drill={drill}
+            />
+          )}
+          {view === "transactions" && (
+            <TransactionsView
+              key={`${range.start}:${range.end}:${category || "all"}`}
+              data={data}
+              start={range.start}
+              end={range.end}
+              initialCategory={category}
+            />
+          )}
+          {view === "cash-flow" && (
+            <CashFlow data={data} analytics={analytics} range={range} />
+          )}
+          {view === "spending" && (
+            <Spending
+              data={data}
+              analytics={analytics}
+              range={range}
+              drill={drill}
+              now={now}
+            />
+          )}
+          {view === "net-worth" && (
+            <NetWorth data={data} worth={worth} range={range} />
+          )}
+          {view === "investments" && <Investments data={data} />}
+          {view === "accounts" && <Accounts data={data} />}
+          <PreservedView mode={view === "advisor" ? "visible" : "hidden"}>
+            <AdvisorView data={data} />
+          </PreservedView>
+          <footer className="page-footer">
+            <span>
+              <ShieldCheck size={13} /> Private by design
+            </span>
+            <span>
+              {latestSync
+                ? `Last bank sync ${latestSync.toLocaleDateString("en-US", { month: "short", day: "numeric" })} at ${latestSync.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`
+                : "Connect an account to get started"}
+            </span>
+            <span>Mantini Money</span>
+          </footer>
+        </main>
+        <nav className="mobile-bottom-nav" aria-label="Mobile navigation">
+          {navigation.slice(0, 4).map((item) => (
+            <a
+              key={item.id}
+              href={`#${item.id}`}
+              className={view === item.id ? "active" : ""}
+            >
+              <item.icon size={20} />
+              <span>
+                {item.id === "transactions" ? "Activity" : item.label}
+              </span>
+            </a>
+          ))}
+          <button onClick={() => setMobileOpen(true)}>
+            <Menu size={20} />
+            <span>More</span>
+          </button>
+        </nav>
+      </div>
     </div>
   );
 }
-
-function AccountPanel({ data }: { data: DashboardData }) {
-  const bankingAccounts = data.accounts.filter(
-    (account) => account.type === "depository" || account.type === "credit",
+type Analytics = ReturnType<typeof analyzeTransactions>;
+type Worth = DashboardData["netWorth"];
+type Range = ReturnType<typeof getDateRange>;
+function Overview({
+  data,
+  analytics: a,
+  worth,
+  range,
+  drill,
+}: {
+  data: DashboardData;
+  analytics: Analytics;
+  worth: Worth;
+  range: Range;
+  drill: (name: string) => void;
+}) {
+  const cashHistory = data.cashTrendData.filter(
+    (x) => x.day >= range.start && x.day <= range.end,
   );
-
+  const recent = a.transactions.slice(0, 5);
+  const top = a.breakdown[0];
   return (
-    <article className="panel accounts-hero">
-      <div className="panel-title"><h2>Accounts</h2><span>{bankingAccounts.length}</span></div>
-      <div className="hero-account-list">
-        {bankingAccounts.map((account) => {
-          const credit = account.type === "credit";
-          return (
-            <div className="hero-account" key={account.id}>
-              <div className={`account-glyph ${credit ? "credit" : "bank"}`}>
-                {credit ? <CreditCard size={18} /> : <Building2 size={18} />}
-              </div>
-              <div className="account-copy">
-                <strong>{account.name}</strong>
-                <span>{account.institutionName}{account.mask ? ` ··${account.mask}` : ""}</span>
-              </div>
-              <div className="account-amount">
-                <strong>{formatMoney(credit ? account.estimatedBalance : account.currentBalance, true)}</strong>
-                {credit ? (
-                  <span>
-                    Posted {formatMoney(account.currentBalance, true)} · Pending {formatMoney(account.pendingOutflow, true)}
+    <div className="view-stack">
+      <div className="metrics-grid">
+        <Metric
+          label="Connected net worth"
+          value={money(worth.netWorth)}
+          note={
+            data.netWorthReliable
+              ? "Assets minus liabilities"
+              : "Available balances · may be incomplete"
+          }
+          icon={<ChartNoAxesCombined size={17} />}
+        />
+        <Metric
+          label="Income"
+          value={money(a.totals.income)}
+          note={
+            <Change value={a.incomeChange} suffix={range.comparisonLabel} />
+          }
+          icon={<ArrowDownLeft size={17} />}
+        />
+        <Metric
+          label="Spending"
+          value={money(a.totals.spending)}
+          note={
+            <Change
+              value={a.spendingChange}
+              suffix={range.comparisonLabel}
+              invert
+            />
+          }
+          icon={<ArrowUpRight size={17} />}
+        />
+        <Metric
+          label="Net cash flow"
+          value={money(a.totals.net)}
+          note="Income + refunds − spending (incl. taxes)"
+          tone={a.totals.net >= 0 ? "positive" : "negative"}
+          icon={<Activity size={17} />}
+        />
+      </div>
+      <div className="overview-main">
+        <section className="panel cash-hero">
+          <PanelHeader
+            title="A clearer view of your cash"
+            subtitle="Your connected checking and savings accounts"
+          >
+            <span className="badge soft-green">Cash balance</span>
+          </PanelHeader>
+          <div className="hero-number">
+            {money(data.totalCash, true)}
+            <span>current balance</span>
+          </div>
+          <BalanceChart data={cashHistory} />
+          <div className="chart-footnote">
+            <i />
+            Balance history reconstructed from imported bank activity.
+          </div>
+        </section>
+        <section className="panel spending-overview">
+          <PanelHeader title="Where it went" subtitle="Spending this period">
+            <ViewLink href="#spending">Explore</ViewLink>
+          </PanelHeader>
+          <Donut data={a.breakdown} total={a.totals.spending} />
+          <div className="mini-legend">
+            {a.breakdown.slice(0, 4).map((x, i) => (
+              <button key={x.name} onClick={() => drill(x.name)}>
+                <span>
+                  <i style={{ background: x.color || palette[i] }} />
+                  {x.name}
+                </span>
+                <strong>{money(x.value)}</strong>
+              </button>
+            ))}
+          </div>
+          {!a.breakdown.length && (
+            <p className="muted">
+              Choose a wider date range to see more activity.
+            </p>
+          )}
+        </section>
+      </div>
+      <div className="insight-strip">
+        <div className="insight-symbol">
+          <Sparkles size={20} />
+        </div>
+        <div>
+          <strong>
+            {top
+              ? `${top.name} is your largest spending category.`
+              : "A connected picture makes the next decision easier."}
+          </strong>
+          <p>
+            {top
+              ? `${money(top.value)} across ${top.count} transactions · ${top.percent.toFixed(0)}% of your spending this period.`
+              : "Connect your accounts to start discovering your spending patterns."}
+          </p>
+        </div>
+        <a className="text-link" href="#advisor">
+          Let’s take a closer look <ArrowRight size={15} />
+        </a>
+      </div>
+      <div className="overview-lower">
+        <section className="panel">
+          <PanelHeader
+            title="Recent activity"
+            subtitle="The latest across your accounts"
+          >
+            <ViewLink href="#transactions" />
+          </PanelHeader>
+          <div className="recent-list">
+            {recent.length ? (
+              recent.map((t) => (
+                <a href="#transactions" className="recent-row" key={t.id}>
+                  <span
+                    className={`merchant-avatar tone-${Math.abs(t.name.charCodeAt(0)) % 5}`}
+                  >
+                    {t.name.slice(0, 1).toUpperCase()}
                   </span>
-                ) : <span>Available cash</span>}
+                  <div>
+                    <strong>{t.name}</strong>
+                    <span>
+                      {t.category} · {shortDate(t.date)}
+                      {t.pending ? " · Pending" : ""}
+                    </span>
+                  </div>
+                  <b className={t.amount < 0 ? "positive" : ""}>
+                    {t.amount < 0 ? "+" : "−"}
+                    {money(Math.abs(t.amount), true)}
+                  </b>
+                </a>
+              ))
+            ) : (
+              <Empty title="No transactions this period" />
+            )}
+          </div>
+        </section>
+        <section className="panel">
+          <PanelHeader
+            title="Your accounts"
+            subtitle={`${data.accounts.length} bank and investment accounts`}
+          >
+            <ViewLink href="#accounts" />
+          </PanelHeader>
+          <AccountRows data={data} limit={4} />
+          <div className="panel-bottom">
+            <span className="muted">Investments & crypto</span>
+            <strong>{money(data.portfolio.totalValue)}</strong>
+            <a
+              href="#investments"
+              className="icon-btn"
+              aria-label="View investments"
+            >
+              <ArrowUpRight size={17} />
+            </a>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+function CashFlow({
+  data,
+  analytics: a,
+  range,
+}: {
+  data: DashboardData;
+  analytics: Analytics;
+  range: Range;
+}) {
+  const [preferredMode, setMode] = useState<"flow" | "table" | null>(null);
+  const smallScreen = useSyncExternalStore(
+    subscribeSmallScreen,
+    readSmallScreen,
+    () => false,
+  );
+  const mode = preferredMode || (smallScreen ? "table" : "flow");
+  const categoryAnalysis = useMemo(
+    () =>
+      analyzeTransactions(
+        data.transactions.filter(
+          (transaction) => transaction.flowType !== "taxes",
+        ),
+        range,
+        "category",
+      ),
+    [data.transactions, range],
+  );
+  const spendingBeforeTax = a.totals.spending - a.totals.taxes;
+  const out = a.totals.spending + a.totals.invested + a.totals.saved;
+  const remaining = a.totals.income + a.totals.refunds - out;
+  return (
+    <div className="view-stack">
+      <div className="metrics-grid">
+        <Metric
+          label="Income"
+          value={money(a.totals.income)}
+          note={
+            <Change value={a.incomeChange} suffix={range.comparisonLabel} />
+          }
+        />
+        <Metric
+          label="Spending & taxes"
+          value={money(a.totals.spending)}
+          note={`${money(a.totals.refunds)} in refunds`}
+        />
+        <Metric
+          label="Net cash flow"
+          value={money(a.totals.net)}
+          note="Before savings and investments"
+          tone={a.totals.net >= 0 ? "positive" : "negative"}
+        />
+        <Metric
+          label="Cash-flow margin"
+          value={
+            a.totals.savingsRate !== null
+              ? `${a.totals.savingsRate.toFixed(1)}%`
+              : "—"
+          }
+          note="Net cash flow as a share of income"
+        />
+      </div>
+      <section className="panel">
+        <PanelHeader
+          title="Follow your money"
+          subtitle="From money in to the things that matter"
+        >
+          <Segments
+            value={mode}
+            onChange={setMode}
+            label="Cash flow view"
+            options={[
+              { value: "flow", label: "Flow diagram" },
+              { value: "table", label: "Income & outflows" },
+            ]}
+          />
+        </PanelHeader>
+        {mode === "flow" ? (
+          <FlowDiagram
+            income={a.totals.income}
+            refunds={a.totals.refunds}
+            spending={spendingBeforeTax}
+            taxes={a.totals.taxes}
+            invested={a.totals.invested}
+            saved={a.totals.saved}
+            categories={categoryAnalysis.breakdown}
+          />
+        ) : (
+          <div className="cash-flow-table">
+            {[
+              { name: "Income", value: a.totals.income },
+              { name: "Refunds", value: a.totals.refunds },
+              { name: "Spending before taxes", value: -spendingBeforeTax },
+              { name: "Taxes", value: -a.totals.taxes },
+              { name: "Invested", value: -a.totals.invested },
+              { name: "Moved to savings", value: -a.totals.saved },
+              { name: "Remaining after allocations", value: remaining },
+            ].map((x) => (
+              <div key={x.name}>
+                <span>{x.name}</span>
+                <span>
+                  {a.totals.income
+                    ? `${((Math.abs(x.value) / a.totals.income) * 100).toFixed(1)}% of income`
+                    : "—"}
+                </span>
+                <strong className={x.value >= 0 ? "positive" : ""}>
+                  {money(x.value, true)}
+                </strong>
               </div>
-            </div>
-          );
-        })}
+            ))}
+          </div>
+        )}
+        <p className="panel-note">
+          Posted transactions only. Transfers and card payments are excluded to
+          avoid counting the same money twice. Balance funding shows outflows
+          above income and refunds.
+        </p>
+      </section>
+      <div className="two-columns">
+        <section className="panel">
+          <PanelHeader title="Money in" subtitle="Your income sources" />
+          <Breakdown data={a.incomeBreakdown} />
+        </section>
+        <section className="panel">
+          <PanelHeader title="Money out" subtitle="Spending, including taxes" />
+          <Breakdown data={a.breakdown} />
+        </section>
       </div>
-    </article>
-  );
-}
-
-function BalancePanel({ data }: { data: DashboardData }) {
-  const [range, setRange] = useState<"30" | "90" | "all">("30");
-  const visibleData = useMemo(() => {
-    if (range === "all") return data.cashTrendData;
-    return data.cashTrendData.slice(-Number(range));
-  }, [data.cashTrendData, range]);
-  const firstBalance = visibleData[0]?.balance ?? data.totalCash;
-  const lastBalance = visibleData.at(-1)?.balance ?? data.totalCash;
-  const balanceChange = lastBalance - firstBalance;
-  const changePercent = firstBalance ? (balanceChange / firstBalance) * 100 : 0;
-  const cashIn = visibleData.reduce((sum, point) => sum + point.cashIn, 0);
-  const cashOut = visibleData.reduce((sum, point) => sum + point.cashOut, 0);
-  const rangeLabel = range === "all" ? "Imported history" : `${range} days`;
-
-  return (
-    <article className="panel balance-hero">
-      <div className="balance-heading">
-        <div><span>Cash balance</span><strong>{formatMoney(data.totalCash, true)}</strong></div>
-        <div className="range-switch" aria-label="Cash history range">
-          {(["30", "90", "all"] as const).map((value) => (
-            <button key={value} className={range === value ? "active" : ""} onClick={() => setRange(value)}>
-              {value === "all" ? "All" : `${value}D`}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="hero-flow">
-        <span className={balanceChange >= 0 ? "positive" : "negative"}>
-          {balanceChange >= 0 ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
-          {balanceChange >= 0 ? "+" : "−"}{formatMoney(Math.abs(balanceChange))} ({Math.abs(changePercent).toFixed(1)}%)
-        </span>
-        <span className="range-context">{rangeLabel}</span>
-        <span className="positive flow-stat"><ArrowUpRight size={14} /> {formatMoney(cashIn)} in</span>
-        <span className="negative flow-stat"><ArrowDownRight size={14} /> {formatMoney(cashOut)} out</span>
-      </div>
-      <div className="balance-chart">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={visibleData} margin={{ top: 14, right: 8, left: 0, bottom: 0 }}>
-            <defs>
-              <linearGradient id="cashFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#8294ff" stopOpacity={0.34} />
-                <stop offset="64%" stopColor="#6578f4" stopOpacity={0.11} />
-                <stop offset="100%" stopColor="#6578f4" stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid vertical={false} stroke="#2b2b3a" strokeDasharray="3 7" />
-            <XAxis
-              dataKey="date"
-              axisLine={false}
-              tickLine={false}
-              minTickGap={48}
-              tick={{ fill: "#77788a", fontSize: 10 }}
-              dy={9}
-            />
-            <YAxis
-              axisLine={false}
-              tickLine={false}
-              width={48}
-              tickFormatter={formatCompactMoney}
-              tick={{ fill: "#77788a", fontSize: 10 }}
-              domain={["auto", "auto"]}
-            />
-            <ReferenceLine
-              y={data.spendingGuide.protectedCash}
-              stroke="#6f9f87"
-              strokeDasharray="5 6"
-              ifOverflow="extendDomain"
-              label={{ value: "Protected floor", position: "insideBottomLeft", fill: "#8fb9a5", fontSize: 9 }}
-            />
-            <Tooltip
-              formatter={(value) => [formatMoney(Number(value), true), "Cash balance"]}
-              labelStyle={{ color: "#9697a9" }}
-              cursor={{ stroke: "#555a85", strokeDasharray: "3 4" }}
-              contentStyle={{ background: "#242432", border: "1px solid #3a3a4c", borderRadius: 10, boxShadow: "0 14px 32px rgba(0,0,0,.28)" }}
-            />
-            <Area
-              type="monotone"
-              dataKey="balance"
-              stroke="#8b9bff"
-              strokeWidth={2.4}
-              fill="url(#cashFill)"
-              activeDot={{ r: 4, fill: "#dfe3ff", stroke: "#6578f4", strokeWidth: 2 }}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
-    </article>
-  );
-}
-
-function SummaryCard({ label, value, note, tone }: { label: string; value: number; note: string; tone: string }) {
-  return (
-    <article className="summary-card">
-      <span>{label}</span>
-      <strong>{formatMoney(value)}</strong>
-      <small className={tone}>{note}</small>
-    </article>
-  );
-}
-
-function formatQuantity(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: value < 1 ? 8 : 4,
-  }).format(value);
-}
-
-function InvestmentConsentButton({ itemId }: { itemId: string }) {
-  const router = useRouter();
-  const [linkToken, setLinkToken] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [label, setLabel] = useState("Show Fidelity holdings");
-  const openedToken = useRef<string | null>(null);
-
-  const onSuccess = useCallback(async () => {
-    setBusy(true);
-    setLabel("Importing holdings…");
-    const response = await fetch("/api/plaid/sync", { method: "POST" });
-    setLabel(response.ok ? "Holdings connected" : "Try Fidelity again");
-    if (response.ok) router.refresh();
-    setLinkToken(null);
-    setBusy(false);
-  }, [router]);
-
-  const { open, ready } = usePlaidLink({
-    token: linkToken,
-    onSuccess,
-    onExit: () => {
-      setLinkToken(null);
-      setBusy(false);
-      setLabel("Show Fidelity holdings");
-    },
-  });
-
-  useEffect(() => {
-    if (ready && linkToken && openedToken.current !== linkToken) {
-      openedToken.current = linkToken;
-      open();
-    }
-  }, [linkToken, open, ready]);
-
-  async function requestConsent() {
-    setBusy(true);
-    setLabel("Opening Fidelity…");
-    const response = await fetch("/api/plaid/investments-consent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ itemId }),
-    });
-    const result = await response.json();
-    if (response.ok) setLinkToken(result.linkToken);
-    else {
-      setLabel(result.error || "Try Fidelity again");
-      setBusy(false);
-    }
-  }
-
-  return (
-    <button className="portfolio-consent" onClick={requestConsent} disabled={busy}>
-      {busy ? <LoaderCircle size={12} className="spin" /> : <Link2 size={12} />}
-      {label}
-    </button>
-  );
-}
-
-function PortfolioPanel({ data }: { data: DashboardData }) {
-  const portfolio = data.portfolio;
-  const maximumInstitutionValue = portfolio.byInstitution[0]?.value || 1;
-  const fidelityItem = data.items.find((item) => item.institutionName.toLowerCase().includes("fidelity"));
-  const fidelityNeedsHoldingsConsent = portfolio.holdings.some(
-    (holding) => holding.institutionName.toLowerCase().includes("fidelity") && holding.type === "account",
-  );
-
-  return (
-    <section className="panel portfolio-panel">
-      <div className="portfolio-summary">
-        <div className="portfolio-heading">
-          <div className="portfolio-icon"><WalletCards size={19} /></div>
-          <div><span>Investments</span><h2>Portfolio</h2></div>
-        </div>
-        <strong className="portfolio-total">{formatMoney(portfolio.totalValue, true)}</strong>
-        {portfolio.totalGain !== null ? (
-          <span className={portfolio.totalGain >= 0 ? "portfolio-gain positive" : "portfolio-gain negative"}>
-            <TrendingUp size={14} /> {portfolio.totalGain >= 0 ? "+" : "−"}{formatMoney(Math.abs(portfolio.totalGain), true)} all time
+      <section className="panel">
+        <PanelHeader
+          title="Income meets spending"
+          subtitle="A month-by-month perspective"
+        />
+        <div className="chart-legend">
+          <span>
+            <i style={{ background: "#367e6d" }} />
+            Income
           </span>
-        ) : (
-          <span className="portfolio-gain muted">Current connected value</span>
-        )}
-        {portfolio.coinbase.status === "connected" ? (
-          <span className="portfolio-source connected">Coinbase live</span>
-        ) : portfolio.coinbase.status === "error" ? (
-          <span className="portfolio-source error" title={portfolio.coinbase.error || undefined}>Coinbase needs attention</span>
-        ) : null}
-        {portfolio.kraken.status === "connected" ? (
-          <span className="portfolio-source connected">Kraken live</span>
-        ) : portfolio.kraken.status === "error" ? (
-          <span className="portfolio-source error" title={portfolio.kraken.error || undefined}>Kraken needs attention</span>
-        ) : (
-          <span className="portfolio-source pending">Kraken key needed</span>
-        )}
-        {fidelityItem && fidelityNeedsHoldingsConsent ? (
-          <InvestmentConsentButton itemId={fidelityItem.id} />
-        ) : null}
-        <div className="institution-allocation">
-          {portfolio.byInstitution.map((institution) => (
-            <div key={institution.name}>
-              <div><span>{institution.name}</span><strong>{formatMoney(institution.value, true)}</strong></div>
-              <i><span style={{ width: `${(institution.value / maximumInstitutionValue) * 100}%` }} /></i>
-            </div>
-          ))}
+          <span>
+            <i style={{ background: "#b9c8c3" }} />
+            Spending
+          </span>
         </div>
+        <MonthlyChart data={a.monthlyTrend} />
+      </section>
+    </div>
+  );
+}
+function Spending({
+  data,
+  analytics: a,
+  range,
+  drill,
+  now,
+}: {
+  data: DashboardData;
+  analytics: Analytics;
+  range: Range;
+  drill: (name: string) => void;
+  now: Date;
+}) {
+  const [group, setGroup] = useState<"group" | "category" | "merchant">(
+    "category",
+  );
+  const grouped = useMemo(
+    () => analyzeTransactions(data.transactions, range, group),
+    [data.transactions, range, group],
+  );
+  const recurring = useMemo(
+    () => detectRecurring(data.transactions, now),
+    [data.transactions, now],
+  );
+  return (
+    <div className="view-stack">
+      <div className="metrics-grid">
+        <Metric
+          label="Total spending"
+          value={money(a.totals.spending)}
+          note={
+            <Change
+              value={a.spendingChange}
+              suffix={range.comparisonLabel}
+              invert
+            />
+          }
+        />
+        <Metric
+          label="Monthly average"
+          value={money(a.averageMonthlySpending)}
+          note="Across months in this period"
+        />
+        <Metric
+          label="Largest category"
+          value={a.breakdown[0]?.name || "—"}
+          note={
+            a.breakdown[0]
+              ? `${a.breakdown[0].percent.toFixed(1)}% of spending`
+              : "No posted spending"
+          }
+        />
+        <Metric
+          label="Spending transactions"
+          value={a.posted.filter(isExpense).length}
+          note={`${money(a.totals.pendingSpending)} pending`}
+        />
       </div>
-      <div className="portfolio-holdings">
-        <div className="portfolio-list-head"><h3>Holdings</h3><span>{portfolio.holdings.length}</span></div>
-        {portfolio.holdings.length ? (
-          <div className="holding-list">
-            {portfolio.holdings.slice(0, 10).map((holding) => (
-              <div className="holding-row" key={`${holding.accountId}-${holding.securityId}`}>
-                <div className={`holding-mark ${holding.type === "cryptocurrency" ? "crypto" : "security"}`}>
-                  {(holding.ticker || (holding.type === "account" ? holding.institutionName : holding.name)).slice(0, 2).toUpperCase()}
+      <section className="panel">
+        <PanelHeader
+          title="Your spending, unpacked"
+          subtitle="Understand the patterns behind the purchases"
+        >
+          <Segments
+            value={group}
+            onChange={setGroup}
+            label="Group spending by"
+            options={[
+              { value: "group", label: "Groups" },
+              { value: "category", label: "Categories" },
+              { value: "merchant", label: "Merchants" },
+            ]}
+          />
+        </PanelHeader>
+        <div className="spending-breakdown">
+          <div>
+            <Donut data={grouped.breakdown} total={a.totals.spending} />
+            <p className="center-note">
+              {range.label}
+              <br />
+              Posted spending, including taxes · refunds shown in cash flow
+            </p>
+          </div>
+          <Breakdown
+            data={grouped.breakdown}
+            onSelect={group === "category" ? drill : undefined}
+          />
+        </div>
+        {group === "category" && (
+          <p className="panel-note">
+            Select a category to explore its transactions.
+          </p>
+        )}
+      </section>
+      <section className="panel">
+        <PanelHeader
+          title="Spending over time"
+          subtitle="Spot the months that look a little different"
+        />
+        <MonthlyChart data={a.monthlyTrend} spendingOnly />
+      </section>
+      <section className="panel">
+        <PanelHeader
+          title="The repeat appearances"
+          subtitle="Estimated recurring charges, detected from your imported history"
+        >
+          <span className="badge">{recurring.length} patterns</span>
+        </PanelHeader>
+        {recurring.length ? (
+          <div className="recurring-grid">
+            {recurring.slice(0, 12).map((x, i) => (
+              <div className="recurring-item" key={`${x.accountId}-${x.name}`}>
+                <span className={`merchant-avatar tone-${i % 5}`}>
+                  {x.name.slice(0, 1)}
+                </span>
+                <div>
+                  <strong>{x.name}</strong>
+                  <span>
+                    {x.cadence} · next around {shortDate(x.nextDate)}
+                  </span>
                 </div>
-                <div className="holding-name">
-                  <strong>{holding.name}</strong>
-                  <span>{holding.type === "account" ? `${holding.subtype || "Investment"} account` : holding.ticker || holding.type || "Holding"} · {holding.institutionName}</span>
-                </div>
-                <div className="holding-quantity">
-                  {holding.type === "account" ? (
-                    <><strong>Connected</strong><span>Account balance</span></>
-                  ) : (
-                    <><strong>{formatQuantity(holding.quantity)}</strong><span>{holding.price === null ? "Quantity" : `${formatMoney(holding.price, true)} each`}</span></>
-                  )}
-                </div>
-                <div className="holding-value">
-                  <strong>{formatMoney(holding.value, true)}</strong>
-                  {holding.costBasis !== null ? <span>Cost {formatMoney(holding.costBasis, true)}</span> : <span>Market value</span>}
-                </div>
+                <b>{money(x.amount, true)}</b>
               </div>
             ))}
           </div>
         ) : (
-          <div className="portfolio-empty">
-            <p>This connection has not shared holdings yet.</p>
-            <span>Use Add account again and choose the investment or crypto accounts Plaid shows.</span>
-          </div>
+          <Empty title="No recurring patterns yet">
+            Recurring estimates appear after several similar posted charges.
+            They are predictions, not scheduled bills.
+          </Empty>
         )}
-      </div>
-    </section>
-  );
-}
-
-function CategoryPanel({ data }: { data: DashboardData }) {
-  const total = data.categoryData.reduce((sum, value) => sum + value.value, 0) || 1;
-  const allocationTotal = data.allocationData.reduce((sum, value) => sum + value.value, 0) || 1;
-  const [expandedCategory, setExpandedCategory] = useState<string | null>(null);
-  const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10);
-  return (
-    <article className="panel category-panel">
-      <div className="panel-title">
-        <div><span>This month</span><h2>Spending</h2></div>
-        <strong>{formatMoney(data.monthSpend, true)}</strong>
-      </div>
-      <div className="allocation-bar">
-        {data.allocationData.map((item) => (
-          <span
-            key={item.name}
-            className={`allocation-segment ${item.tone}`}
-            style={{ width: `${(item.value / allocationTotal) * 100}%` }}
-            title={`${item.name}: ${formatMoney(item.value, true)}`}
-          />
-        ))}
-      </div>
-      <div className="allocation-key">
-        {data.allocationData.map((item) => (
-          <span key={item.name}><i className={item.tone} />{item.name} {formatMoney(item.value)}</span>
-        ))}
-      </div>
-      <div className="category-list">
-        {data.categoryData.slice(0, 8).map((category, index) => {
-          const expanded = expandedCategory === category.name;
-          const transactions = data.transactions.filter((transaction) =>
-            transaction.date >= monthStart &&
-            !transaction.pending &&
-            transaction.amount > 0 &&
-            transaction.flowType === "spending" &&
-            transaction.category === category.name,
-          );
-          return (
-            <div className={`category-group ${expanded ? "expanded" : ""}`} key={category.name}>
-              <button
-                className="category-row"
-                onClick={() => setExpandedCategory(expanded ? null : category.name)}
-                aria-expanded={expanded}
-              >
-                <div><ChevronDown size={14} className="category-chevron" /><span className={`category-dot dot-${index % 5}`} />{category.name}<small>{transactions.length}</small></div>
-                <div className="category-track"><span style={{ width: `${(category.value / total) * 100}%` }} /></div>
-                <strong>{formatMoney(category.value)}</strong>
-              </button>
-              {expanded ? (
-                <div className="category-transactions">
-                  {transactions.map((transaction) => (
-                    <div key={transaction.id}>
-                      <span>{new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
-                      <strong>{transaction.name}</strong>
-                      <span>{transaction.accountName}</span>
-                      <b>−{formatMoney(transaction.amount, true)}</b>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
-    </article>
-  );
-}
-
-function SpendGuidePanel({ data }: { data: DashboardData }) {
-  const [purchase, setPurchase] = useState("40");
-  const [description, setDescription] = useState("");
-  const [assessment, setAssessment] = useState<string | null>(null);
-  const [assessing, setAssessing] = useState(false);
-  const amount = Math.max(0, Number(purchase) || 0);
-  const afterPurchase = data.spendingGuide.remaining - amount;
-  const share = data.spendingGuide.monthlyAllowance
-    ? (amount / data.spendingGuide.monthlyAllowance) * 100
-    : 0;
-  const within = afterPurchase >= 0;
-
-  async function askOpus() {
-    if (!amount || !description.trim()) return;
-    setAssessing(true);
-    setAssessment(null);
-    const response = await fetch("/api/advisor/purchase", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ amount, description }),
-    });
-    const result = await response.json();
-    setAssessment(response.ok ? result.assessment.replace(/\*\*/g, "") : "Opus could not evaluate this purchase right now.");
-    setAssessing(false);
-  }
-
-  return (
-    <article className="panel spend-guide">
-      <div className="guide-main">
-        <div className="guide-heading">
-          <div className="guide-icon"><CircleGauge size={19} /></div>
-          <div><span>Spending guardrail</span><h2>Flexible allowance</h2></div>
-          <span className="posted-only">Posted income only</span>
-        </div>
-        <div className="guide-balance">
-          <strong>{formatMoney(data.spendingGuide.remaining, true)}</strong>
-          <span>remaining this month</span>
-        </div>
-        <div className="guide-progress"><span style={{ width: `${data.spendingGuide.usedPercent}%` }} /></div>
-        <div className="guide-stats">
-          <div><span>Starting range</span><strong>{formatMoney(data.spendingGuide.monthlyAllowance)}</strong></div>
-          <div><span>Already spent</span><strong>{formatMoney(data.monthSpend)}</strong></div>
-          <div><span>Cash left untouched</span><strong>{formatMoney(data.spendingGuide.protectedCash)}</strong></div>
-        </div>
-        <details className="guide-explainer">
-          <summary>How this number is calculated</summary>
-          <ol>
-            <li><span>After-savings income</span><strong>{formatMoney(data.monthIncome)} income − {formatMoney(data.monthSaved)} moved to savings = {formatMoney(data.spendingGuide.postReserveIncome)}</strong></li>
-            <li><span>Income rule</span><strong>{data.spendingGuide.incomeRate}% × {formatMoney(data.spendingGuide.postReserveIncome)} = {formatMoney(data.spendingGuide.incomeAllowance)}</strong></li>
-            <li><span>Protected floor</span><strong>{formatMoney(data.spendingGuide.reservedCash)} savings + 3 × {formatMoney(data.spendingGuide.recentMonthlySpend)} = {formatMoney(data.spendingGuide.protectedCash)}</strong></li>
-            <li><span>Safe starting range</span><strong>Lower of {formatMoney(data.spendingGuide.incomeAllowance)} or {formatMoney(data.spendingGuide.cashCapacity)} cash capacity</strong></li>
-            <li><span>Available now</span><strong>{formatMoney(data.spendingGuide.monthlyAllowance)} − {formatMoney(data.monthSpend)} spent = {formatMoney(data.spendingGuide.remaining)}</strong></li>
-          </ol>
-          <p>Your savings balance is treated as untouchable. Savings moves, investments, card payments, and transfers are not lifestyle spending. Future payouts wait until they post.</p>
-        </details>
-      </div>
-      <div className="purchase-check">
-        <div className="purchase-heading"><div><span>Purchase check</span><h3>Can I buy this?</h3></div><button onClick={askOpus} disabled={assessing || !amount || !description.trim()}>{assessing ? <LoaderCircle size={13} className="spin" /> : <Sparkles size={13} />} Ask Opus</button></div>
-        <div className="purchase-fields">
-          <label><span>$</span><input type="number" min="0" step="1" value={purchase} onChange={(event) => setPurchase(event.target.value)} aria-label="Purchase amount" /></label>
-          <input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What is it?" aria-label="Purchase description" />
-        </div>
-        <div className={`purchase-result ${within ? "within" : "over"}`}>
-          <strong>{within ? "Within your current guardrail" : "Over your current guardrail"}</strong>
-          <p>
-            {description || "This purchase"} uses {share.toFixed(1)}% of the monthly range and leaves {formatMoney(Math.max(0, afterPurchase), true)}.
-          </p>
-        </div>
-        {assessment ? <div className="purchase-assessment"><Bot size={14} /><p>{assessment}</p></div> : null}
-        <p className="guide-method">
-          Starts at {data.spendingGuide.incomeRate}% of posted income after savings transfers, then keeps the full savings balance plus three recent months of spending untouched.
+        <p className="panel-note">
+          Estimates, not confirmed subscriptions. Actual charge dates and
+          amounts may vary.
         </p>
-      </div>
-    </article>
-  );
-}
-
-function AdvisorPanel() {
-  const [input, setInput] = useState("");
-  const [brief, setBrief] = useState<string | null>(null);
-  const [briefError, setBriefError] = useState(false);
-  const transport = useMemo(() => new DefaultChatTransport({ api: "/api/advisor" }), []);
-  const { messages, sendMessage, status, error } = useChat<FinanceAgentUIMessage>({ transport });
-
-  useEffect(() => {
-    let active = true;
-    fetch("/api/advisor/brief")
-      .then(async (response) => {
-        if (!response.ok) throw new Error("Brief unavailable");
-        return response.json();
-      })
-      .then((value) => { if (active) setBrief(value.content); })
-      .catch(() => { if (active) setBriefError(true); });
-    return () => { active = false; };
-  }, []);
-
-  function ask(text: string) {
-    if (!text.trim() || status !== "ready") return;
-    sendMessage({ text });
-    setInput("");
-  }
-
-  return (
-    <article className="panel advisor-panel">
-      <div className="advisor-head">
-        <div className="advisor-mark"><Sparkles size={17} /></div>
-        <div><span>Claude Opus 4.6</span><h2>Money copilot</h2></div>
-        <i className="live-dot" />
-      </div>
-      <div className="advisor-body">
-        {!brief && !briefError ? (
-          <div className="advisor-loading"><LoaderCircle className="spin" size={17} /> Analyzing today’s numbers…</div>
-        ) : null}
-        {brief ? <div className="advisor-brief"><Bot size={16} /><p>{brief.replace(/\*\*/g, "")}</p></div> : null}
-        {briefError ? <div className="advisor-brief"><Bot size={16} /><p>Ask me anything about the connected accounts and spending.</p></div> : null}
-        {messages.map((message) => (
-          <div className={`advisor-message ${message.role}`} key={message.id}>
-            {message.parts.map((part, index) => part.type === "text" ? <p key={index}>{part.text.replace(/\*\*/g, "")}</p> : null)}
-          </div>
-        ))}
-        {status === "submitted" ? <div className="advisor-thinking"><span /><span /><span /></div> : null}
-        {error ? <p className="advisor-error">The copilot hit a temporary error. Try again.</p> : null}
-      </div>
-      {!messages.length ? (
-        <div className="quick-prompts">
-          <button onClick={() => ask("Where am I overspending?")}>Overspending</button>
-          <button onClick={() => ask("What should I watch this week?")}>This week</button>
-          <button onClick={() => ask("Help me set smart guardrails for this income.")}>Guardrails</button>
-        </div>
-      ) : null}
-      <form className="advisor-input" onSubmit={(event) => { event.preventDefault(); ask(input); }}>
-        <input value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask about your money" />
-        <button type="submit" disabled={!input.trim() || status !== "ready"} aria-label="Send"><Send size={15} /></button>
-      </form>
-    </article>
-  );
-}
-
-function CategorySelect({ transaction }: { transaction: DashboardData["transactions"][number] }) {
-  const router = useRouter();
-  const [category, setCategory] = useState(transaction.category);
-  const [saving, setSaving] = useState(false);
-
-  async function update(next: string) {
-    const previous = category;
-    setCategory(next);
-    setSaving(true);
-    const response = await fetch("/api/transactions/category", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ transactionId: transaction.id, category: next }),
-    });
-    if (!response.ok) setCategory(previous);
-    else router.refresh();
-    setSaving(false);
-  }
-
-  return (
-    <div className="category-control">
-      <Sparkles size={11} />
-      <select value={category} onChange={(event) => update(event.target.value)} disabled={saving} aria-label={`Category for ${transaction.name}`}>
-        {TRANSACTION_CATEGORIES.map((option) => <option key={option}>{option}</option>)}
-      </select>
-      {saving ? <LoaderCircle size={11} className="spin" /> : null}
+      </section>
     </div>
   );
 }
-
-function TransactionExplorer({ data }: { data: DashboardData }) {
-  const [accountKind, setAccountKind] = useState<AccountKind>("all");
-  const [accountId, setAccountId] = useState("all");
-  const [flowType, setFlowType] = useState<"all" | FlowType>("all");
-  const [dateRange, setDateRange] = useState<DateRange>("month");
-  const [query, setQuery] = useState("");
-
-  const filtered = useMemo(() => {
-    const now = new Date();
-    const monthCutoff = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 10);
-    const threeMonthCutoff = new Date(now.getFullYear(), now.getMonth() - 2, 1).toISOString().slice(0, 10);
-    const normalizedQuery = query.trim().toLowerCase();
-    return data.transactions.filter((transaction) => {
-      if (accountKind !== "all" && transaction.accountType !== accountKind) return false;
-      if (accountId !== "all" && transaction.accountId !== accountId) return false;
-      if (flowType !== "all" && transaction.flowType !== flowType) return false;
-      if (dateRange === "month" && transaction.date < monthCutoff) return false;
-      if (dateRange === "three_months" && transaction.date < threeMonthCutoff) return false;
-      if (normalizedQuery && !`${transaction.name} ${transaction.rawName} ${transaction.category} ${transaction.accountName}`.toLowerCase().includes(normalizedQuery)) return false;
-      return true;
-    });
-  }, [accountId, accountKind, data.transactions, dateRange, flowType, query]);
-
+function NetWorth({
+  data,
+  worth: w,
+  range,
+}: {
+  data: DashboardData;
+  worth: Worth;
+  range: Range;
+}) {
+  const [chart, setChart] = useState<"netWorth" | "assets" | "liabilities">(
+    "netWorth",
+  );
+  const history = data.netWorthHistory.filter(
+    (x) => x.date >= range.start && x.date <= range.end,
+  );
   return (
-    <section className="panel transactions-panel">
-      <div className="transactions-head">
-        <div><h2>Transactions</h2><span>{filtered.length} results</span></div>
-        <div className="segmented-control">
-          {(["all", "depository", "credit"] as const).map((value) => (
-            <button key={value} className={accountKind === value ? "active" : ""} onClick={() => setAccountKind(value)}>
-              {value === "all" ? "All" : value === "depository" ? "Bank" : "Credit card"}
-            </button>
-          ))}
-        </div>
+    <div className="view-stack">
+      <div className="metrics-grid">
+        <Metric
+          label="Connected net worth"
+          value={money(w.netWorth, true)}
+          note={
+            data.netWorthReliable
+              ? "Latest connected balances"
+              : "Available balances · may be incomplete"
+          }
+        />
+        <Metric
+          label="Total assets"
+          value={money(w.assets)}
+          note="Cash, investments, crypto & other assets"
+          tone="positive"
+        />
+        <Metric
+          label="Total liabilities"
+          value={money(w.liabilities)}
+          note="Card balances, loans & overdrafts"
+        />
+        <Metric
+          label="Tracked accounts"
+          value={data.accounts.length}
+          note={
+            w.missingBalances || w.unsupportedCurrencies
+              ? `${w.missingBalances} unavailable · ${w.unsupportedCurrencies} non-USD excluded`
+              : "Plus connected crypto portfolios"
+          }
+        />
       </div>
-      <div className="filter-row">
-        <label className="search-control"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search" /></label>
-        <select value={accountId} onChange={(event) => setAccountId(event.target.value)} aria-label="Account">
-          <option value="all">All accounts</option>
-          {data.accounts.map((account) => <option key={account.id} value={account.id}>{account.name} ··{account.mask}</option>)}
-        </select>
-        <select value={flowType} onChange={(event) => setFlowType(event.target.value as "all" | FlowType)} aria-label="Activity type">
-          <option value="all">All activity</option><option value="spending">Spending</option><option value="income">Income</option><option value="investment">Investments</option><option value="savings">Savings</option><option value="credit_payment">Card payments</option><option value="transfer">Transfers</option><option value="refund">Refunds</option><option value="taxes">Taxes</option>
-        </select>
-        <select value={dateRange} onChange={(event) => setDateRange(event.target.value as DateRange)} aria-label="Date range">
-          <option value="month">This month</option><option value="three_months">Last 3 months</option><option value="all">All imported</option>
-        </select>
-      </div>
-      <div className="transaction-table">
-        <div className="transaction-header"><span>Date</span><span>To / From</span><span>Account</span><span>Category</span><span>Type</span><span>Amount</span></div>
-        {filtered.slice(0, 100).map((transaction) => (
-          <div className="transaction-row" key={transaction.id}>
-            <span className="transaction-date">{new Date(`${transaction.date}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric" })}</span>
-            <div className="merchant-cell"><div className="merchant-mark">{transaction.name.slice(0, 1).toUpperCase()}</div><div><strong>{transaction.name}</strong>{transaction.pending ? <span className="pending-badge">Pending</span> : null}</div></div>
-            <span className="account-cell">{transaction.accountName} ··{transaction.accountMask}</span>
-            <CategorySelect transaction={transaction} />
-            <span className={`flow-badge ${transaction.flowType}`}>{transaction.flowLabel}</span>
-            <strong className={transaction.amount < 0 ? "income" : "expense"}>{transaction.amount < 0 ? "+" : "−"}{formatMoney(Math.abs(transaction.amount), true)}</strong>
+      <section className="panel">
+        <PanelHeader
+          title="The bigger picture"
+          subtitle="Actual recorded snapshots of your connected net worth"
+        >
+          <Segments
+            value={chart}
+            onChange={setChart}
+            label="Net worth chart metric"
+            options={[
+              { value: "netWorth", label: "Net worth" },
+              { value: "assets", label: "Assets" },
+              { value: "liabilities", label: "Liabilities" },
+            ]}
+          />
+        </PanelHeader>
+        {history.length > 1 ? (
+          <BalanceChart
+            data={history.map((x) => ({ ...x, date: shortDate(x.date) }))}
+            dataKey={chart}
+            label={chart === "netWorth" ? "Net worth" : chart}
+          />
+        ) : (
+          <div className="history-start">
+            <div className="history-icon">
+              <ChartNoAxesCombined size={28} />
+            </div>
+            <h3>A new chapter starts here.</h3>
+            <p>
+              Your current net worth is {money(w.netWorth)}. Daily balance
+              snapshots will build your history from here, without guessing at
+              past market values.
+            </p>
+            <span className="badge soft-green">
+              {history.length
+                ? `First snapshot · ${shortDate(history[0].date)}`
+                : "No snapshots in this period"}
+            </span>
           </div>
-        ))}
-        {!filtered.length ? <div className="no-results">No transactions match these filters.</div> : null}
+        )}
+        <p className="panel-note">
+          Connected assets only. Account balances can update at different times.
+          No property or other unconnected assets are included. Historical
+          snapshots reflect the accounts connected at the time.
+        </p>
+      </section>
+      <div className="two-columns">
+        <section className="panel">
+          <PanelHeader
+            title="What you own"
+            subtitle="How your connected assets are distributed"
+          />
+          <div className="asset-donut">
+            <Donut data={w.allocation} total={w.assets} label="Total assets" />
+          </div>
+          <Breakdown data={w.allocation} />
+        </section>
+        <section className="panel">
+          <PanelHeader
+            title="What you owe"
+            subtitle="Card balances, loans, and overdrafts"
+          />
+          {data.accounts.some(
+            (x) =>
+              (["credit", "loan"].includes(x.type) &&
+                (x.currentBalance ?? 0) > 0) ||
+              (!["credit", "loan"].includes(x.type) &&
+                (x.currentBalance ?? 0) < 0),
+          ) ? (
+            <AccountRows
+              data={{
+                ...data,
+                accounts: data.accounts.filter(
+                  (x) =>
+                    (["credit", "loan"].includes(x.type) &&
+                      (x.currentBalance ?? 0) > 0) ||
+                    (!["credit", "loan"].includes(x.type) &&
+                      (x.currentBalance ?? 0) < 0),
+                ),
+              }}
+            />
+          ) : (
+            <Empty title="No connected liabilities" />
+          )}
+          <div className="panel-bottom">
+            <span>Total liabilities</span>
+            <strong>{money(w.liabilities, true)}</strong>
+          </div>
+        </section>
       </div>
-    </section>
+    </div>
   );
 }
-
-export function Dashboard({ initialData, environment }: { initialData: DashboardData; environment: "sandbox" | "production" }) {
-  const latestSync = initialData.items
-    .map((item) => parseStoredTimestamp(item.updatedAt).getTime())
-    .sort((a, b) => b - a)[0];
-
+function Investments({ data }: { data: DashboardData }) {
+  const [filter, setFilter] = useState("all");
+  const [query, setQuery] = useState("");
+  const portfolio = data.portfolio;
+  const holdings = portfolio.holdings.filter(
+    (h) =>
+      (filter === "all" || h.institutionName === filter) &&
+      `${h.name} ${h.ticker || ""}`.toLowerCase().includes(query.toLowerCase()),
+  );
+  const fidelity = data.items.find((x) => /fidelity/i.test(x.institutionName));
   return (
-    <main>
-      <header className="topbar">
-        <div className="brand"><div className="brand-mark"><Landmark size={19} /></div><strong>Mantini</strong></div>
-        <div className="topbar-actions"><ConnectionControls environment={environment} />{process.env.NODE_ENV !== "development" && <UserButton />}</div>
-      </header>
-      <div className="dashboard-shell">
-        <section className="welcome-row">
-          <div><h1>Welcome back</h1>{latestSync ? <span>Updated {new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit", timeZoneName: "short" }).format(new Date(latestSync))}</span> : null}</div>
-        </section>
-
-        {!initialData.accounts.length ? (
-          <section className="panel empty-state"><Landmark size={28} /><h2>Connect an account</h2></section>
-        ) : (
-          <>
-            <section className="hero-grid"><BalancePanel data={initialData} /><AccountPanel data={initialData} /></section>
-            <section className="summary-grid">
-              <SummaryCard label="Income" value={initialData.monthIncome} note="this month" tone="positive" />
-              <SummaryCard label="Spent" value={initialData.monthSpend} note={`${formatMoney(initialData.monthPendingSpend)} pending`} tone="negative" />
-              <SummaryCard label="Saved" value={initialData.monthSaved} note="internal reserves" tone="oak" />
-              <SummaryCard label="Unallocated" value={initialData.monthUnallocated} note="income not assigned" tone="muted" />
-            </section>
-            {(initialData.portfolio.holdings.length || initialData.portfolio.coinbase.configured || initialData.accounts.some((account) => account.type === "investment")) ? <PortfolioPanel data={initialData} /> : null}
-            <SpendGuidePanel data={initialData} />
-            <section className="insight-grid"><CategoryPanel data={initialData} /><AdvisorPanel /></section>
-            <TransactionExplorer data={initialData} />
-          </>
-        )}
+    <div className="view-stack">
+      <div className="metrics-grid">
+        <Metric
+          label="Portfolio value"
+          value={money(portfolio.totalValue, true)}
+          note="Current holdings & investment balances"
+        />
+        <Metric
+          label="Unrealized gain / loss"
+          value={money(portfolio.totalGain, true)}
+          note={
+            portfolio.totalGain === null
+              ? "Complete cost basis is not available"
+              : "Across holdings with reported cost basis"
+          }
+          tone={
+            portfolio.totalGain !== null && portfolio.totalGain >= 0
+              ? "positive"
+              : "muted"
+          }
+        />
+        <Metric
+          label="Holdings"
+          value={portfolio.holdings.length}
+          note="Stocks, funds, crypto & account totals"
+        />
+        <Metric
+          label="Institutions"
+          value={portfolio.byInstitution.length}
+          note="Connected to your portfolio"
+        />
       </div>
-    </main>
+      <div className="investment-top">
+        <section className="panel">
+          <PanelHeader
+            title="A portfolio that’s all together"
+            subtitle="Allocation by institution"
+          />
+          <div className="portfolio-allocation">
+            <Donut
+              data={portfolio.byInstitution}
+              total={portfolio.totalValue}
+              label="Portfolio value"
+            />
+            <Breakdown data={portfolio.byInstitution} />
+          </div>
+        </section>
+        <section className="panel connection-summary">
+          <PanelHeader
+            title="Portfolio connections"
+            subtitle="A pulse on your investment data"
+          />
+          {[
+            ...data.items
+              .filter((x) =>
+                data.accounts.some(
+                  (a) =>
+                    a.type === "investment" &&
+                    a.institutionName === x.institutionName,
+                ),
+              )
+              .map((x) => ({
+                name: x.institutionName,
+                status: x.status === "healthy" ? "connected" : x.status,
+              })),
+            { name: "Coinbase", status: portfolio.coinbase.status },
+            { name: "Kraken", status: portfolio.kraken.status },
+          ].map((x) => (
+            <div className="provider-status" key={x.name}>
+              <span className="institution-icon">
+                <Landmark size={18} />
+              </span>
+              <strong>{x.name}</strong>
+              <span
+                className={`badge ${x.status === "connected" ? "soft-green" : ""}`}
+              >
+                {x.status === "connected"
+                  ? "Connected"
+                  : x.status === "error"
+                    ? "Needs attention"
+                    : "Not connected"}
+              </span>
+            </div>
+          ))}
+          {fidelity &&
+            portfolio.holdings.some(
+              (x) =>
+                /fidelity/i.test(x.institutionName) && x.type === "account",
+            ) && <InvestmentConsentButton itemId={fidelity.id} />}
+          <p className="panel-note">
+            Values reflect each provider’s latest available update, not
+            real-time market quotes.
+          </p>
+        </section>
+      </div>
+      <section className="panel">
+        <PanelHeader
+          title="Your holdings"
+          subtitle={`${holdings.length} positions in this view`}
+        >
+          <div className="inline-filters">
+            <label className="search-field">
+              <Search size={15} />
+              <input
+                aria-label="Search holdings"
+                placeholder="Find a holding…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </label>
+            <select
+              className="field"
+              aria-label="Filter investment institution"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            >
+              <option value="all">All institutions</option>
+              {portfolio.byInstitution.map((x) => (
+                <option key={x.name}>{x.name}</option>
+              ))}
+            </select>
+          </div>
+        </PanelHeader>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Asset</th>
+                <th>Institution</th>
+                <th className="align-right">Quantity</th>
+                <th className="align-right">Price</th>
+                <th className="align-right">Value</th>
+                <th className="align-right">Allocation</th>
+              </tr>
+            </thead>
+            <tbody>
+              {holdings.map((h, i) => (
+                <tr key={`${h.accountId}-${h.securityId}`}>
+                  <td>
+                    <div className="asset-cell">
+                      <span className={`merchant-avatar tone-${i % 5}`}>
+                        {(h.ticker || h.name).slice(0, 2).toUpperCase()}
+                      </span>
+                      <div>
+                        <strong>{h.name}</strong>
+                        <span>
+                          {h.ticker || h.subtype || h.type}
+                          {h.type === "account" ? " · balance only" : ""}
+                        </span>
+                      </div>
+                    </div>
+                  </td>
+                  <td>{h.institutionName}</td>
+                  <td className="align-right">
+                    {h.type === "account"
+                      ? "—"
+                      : new Intl.NumberFormat("en-US", {
+                          maximumFractionDigits: 6,
+                        }).format(h.quantity)}
+                  </td>
+                  <td className="align-right">{money(h.price, true)}</td>
+                  <td className="align-right">
+                    <strong>{money(h.value, true)}</strong>
+                  </td>
+                  <td className="align-right">
+                    {portfolio.totalValue
+                      ? ((h.value / portfolio.totalValue) * 100).toFixed(1)
+                      : 0}
+                    %
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!holdings.length && <Empty title="No holdings match this view" />}
+        <p className="panel-note">
+          Balances shown in USD. Small positions below $1 and previously
+          excluded holdings remain hidden from this holdings view; connected net
+          worth uses full account balances.
+        </p>
+      </section>
+    </div>
+  );
+}
+function AccountRows({
+  data,
+  limit,
+  types,
+}: {
+  data: DashboardData;
+  limit?: number;
+  types?: string[];
+}) {
+  const accounts = data.accounts
+    .filter((a) => !types || types.includes(a.type))
+    .slice(0, limit);
+  return (
+    <div className="account-list">
+      {accounts.length ? (
+        accounts.map((a) => (
+          <div className="account-row" key={a.id}>
+            <span
+              className={`institution-icon ${a.type === "credit" ? "credit" : ""}`}
+            >
+              {a.type === "credit" ? (
+                <CreditCard size={19} />
+              ) : a.type === "investment" ? (
+                <TrendingUp size={19} />
+              ) : (
+                <Landmark size={19} />
+              )}
+            </span>
+            <div className="account-detail">
+              <strong>{a.name}</strong>
+              <span>
+                {a.institutionName}
+                {a.mask ? ` ··${a.mask}` : ""}
+              </span>
+            </div>
+            <div className="account-balance">
+              <strong>{money(a.currentBalance, true)}</strong>
+              <span>
+                {a.type === "credit"
+                  ? "Current balance"
+                  : a.subtype?.replaceAll("_", " ") || a.type}
+              </span>
+            </div>
+          </div>
+        ))
+      ) : (
+        <Empty title="No connected accounts yet" />
+      )}
+    </div>
+  );
+}
+function Accounts({ data }: { data: DashboardData }) {
+  const [kind, setKind] = useState("all");
+  const filtered = {
+    ...data,
+    accounts: data.accounts.filter((x) => kind === "all" || x.type === kind),
+  };
+  return (
+    <div className="view-stack">
+      <div className="metrics-grid">
+        <Metric
+          label="Cash accounts"
+          value={money(data.totalCash)}
+          note={`${data.accounts.filter((x) => x.type === "depository").length} connected accounts`}
+        />
+        <Metric
+          label="Credit card balances"
+          value={money(
+            data.accounts
+              .filter((x) => x.type === "credit")
+              .reduce((s, x) => s + (x.currentBalance || 0), 0),
+          )}
+          note="Posted balances; pending shown below"
+        />
+        <Metric
+          label="Investment accounts"
+          value={data.accounts.filter((x) => x.type === "investment").length}
+          note="Bank-connected investment accounts"
+        />
+        <Metric
+          label="Connections"
+          value={
+            data.items.length +
+            [data.portfolio.coinbase, data.portfolio.kraken].filter(
+              (x) => x.configured,
+            ).length
+          }
+          note="Banks, brokerages & crypto"
+        />
+      </div>
+      <section className="panel">
+        <PanelHeader
+          title="Everything, connected"
+          subtitle="Current balances from your financial institutions"
+        >
+          <select
+            className="field"
+            aria-label="Filter account type"
+            value={kind}
+            onChange={(e) => setKind(e.target.value)}
+          >
+            <option value="all">All account types</option>
+            <option value="depository">Cash & savings</option>
+            <option value="credit">Credit cards</option>
+            <option value="investment">Investments</option>
+            <option value="loan">Loans</option>
+          </select>
+        </PanelHeader>
+        <AccountRows data={filtered} />
+      </section>
+      <section className="panel">
+        <PanelHeader
+          title="Connection health"
+          subtitle="Know when your data was last updated"
+        />
+        <div className="connection-health">
+          {data.items.map((item) => (
+            <div className="health-row" key={item.id}>
+              <span className="institution-icon">
+                <Landmark size={20} />
+              </span>
+              <div>
+                <strong>{item.institutionName}</strong>
+                <span>
+                  {item.errorMessage ||
+                    `Last synced ${timestamp(item.updatedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`}
+                </span>
+              </div>
+              <span
+                className={`badge ${item.status === "healthy" ? "soft-green" : "soft-red"}`}
+              >
+                {item.status === "healthy" ? (
+                  <>
+                    <Check size={12} />
+                    Connected
+                  </>
+                ) : (
+                  "Needs attention"
+                )}
+              </span>
+            </div>
+          ))}
+          {[
+            { name: "Coinbase", ...data.portfolio.coinbase },
+            { name: "Kraken", ...data.portfolio.kraken },
+          ].map((item) => (
+            <div className="health-row" key={item.name}>
+              <span className="institution-icon">
+                <Wallet size={20} />
+              </span>
+              <div>
+                <strong>{item.name}</strong>
+                <span>
+                  {item.error ||
+                    (item.updatedAt
+                      ? `Updated ${timestamp(item.updatedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
+                      : item.configured
+                        ? "Waiting for data"
+                        : "View-only API credentials not configured")}
+                </span>
+              </div>
+              <span
+                className={`badge ${item.status === "connected" ? "soft-green" : item.status === "error" ? "soft-red" : ""}`}
+              >
+                {item.status === "connected"
+                  ? "Connected"
+                  : item.status === "error"
+                    ? "Needs attention"
+                    : "Not connected"}
+              </span>
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="panel">
+        <PanelHeader
+          title="Credit card details"
+          subtitle="Pending activity and upcoming payments"
+        />
+        {data.accounts.some((x) => x.type === "credit") ? (
+          <div className="credit-grid">
+            {data.accounts
+              .filter((x) => x.type === "credit")
+              .map((a) => (
+                <div className="credit-detail" key={a.id}>
+                  <div>
+                    <CreditCard size={20} />
+                    <strong>{a.name}</strong>
+                    <span>··{a.mask || "—"}</span>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Posted balance</dt>
+                      <dd>{money(a.currentBalance, true)}</dd>
+                    </div>
+                    <div>
+                      <dt>Pending activity</dt>
+                      <dd>{money(a.pendingOutflow, true)}</dd>
+                    </div>
+                    <div>
+                      <dt>Credit limit</dt>
+                      <dd>{money(a.creditLimit)}</dd>
+                    </div>
+                    <div>
+                      <dt>Minimum payment</dt>
+                      <dd>{money(a.minimumPayment, true)}</dd>
+                    </div>
+                    <div>
+                      <dt>Next payment due</dt>
+                      <dd>
+                        {a.nextPaymentDueDate
+                          ? shortDate(a.nextPaymentDueDate)
+                          : "Not provided"}
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+              ))}
+          </div>
+        ) : (
+          <Empty title="No credit cards connected" />
+        )}
+      </section>
+    </div>
   );
 }
