@@ -1,10 +1,12 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { ArrowUpRight, Bot, Check, ChevronRight, CircleAlert, CircleGauge, LoaderCircle, RefreshCw, Send, ShieldCheck, ShoppingBag, Sparkles, Square, Wallet } from "lucide-react";
 import type { FinanceAgentUIMessage } from "@/lib/ai/finance-agent";
+import { AdvisorMarkdown } from "./advisor-markdown";
 import "./finance-tools.css";
 
 type DashboardData = Awaited<ReturnType<typeof import("@/lib/dashboard").getDashboardData>>;
@@ -14,15 +16,11 @@ function money(value: number, cents = false) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: cents ? 2 : 0 }).format(value);
 }
 
-function plainText(value: string) {
-  return value.replace(/\*\*/g, "");
-}
-
 function failureMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function PurchaseCheck({ data }: { data: DashboardData }) {
+export function PurchaseCheck({ data }: { data: DashboardData }) {
   const [amountText, setAmountText] = useState("");
   const [description, setDescription] = useState("");
   const [assessment, setAssessment] = useState<string | null>(null);
@@ -33,8 +31,8 @@ function PurchaseCheck({ data }: { data: DashboardData }) {
   const amount = Number(amountText);
   const validAmount = amountText.trim() !== "" && Number.isFinite(amount) && amount > 0 && amount <= 1_000_000;
   const afterPurchase = data.spendingGuide.remaining - amount;
-  const within = afterPurchase >= 0;
-  const share = data.spendingGuide.monthlyAllowance > 0 ? amount / data.spendingGuide.monthlyAllowance * 100 : null;
+  const within = data.spendingGuide.available && afterPurchase >= 0;
+
 
   function invalidateAssessment() {
     requestController.current?.abort();
@@ -64,7 +62,7 @@ function PurchaseCheck({ data }: { data: DashboardData }) {
       });
       const result = await response.json().catch(() => null);
       if (!response.ok || typeof result?.assessment !== "string") throw new Error(result?.error || "The advisor could not evaluate this purchase. Please try again.");
-      if (!controller.signal.aborted && requestVersion.current === version) setAssessment(plainText(result.assessment));
+      if (!controller.signal.aborted && requestVersion.current === version) setAssessment(result.assessment);
     } catch (error) {
       if (!controller.signal.aborted && requestVersion.current === version) setAssessmentError(failureMessage(error, "Could not connect to the advisor. Please try again."));
     } finally {
@@ -81,44 +79,82 @@ function PurchaseCheck({ data }: { data: DashboardData }) {
         <input className="field" id="purchase-description" value={description} maxLength={120} placeholder="A weekend away, new headphones…" onChange={(event) => { setDescription(event.target.value); invalidateAssessment(); }} />
         <label className="advisor-field-label" htmlFor="purchase-amount">Purchase amount</label>
         <div className="advisor-amount-input"><span>$</span><input id="purchase-amount" type="number" inputMode="decimal" min="0.01" max="1000000" step="0.01" placeholder="0.00" value={amountText} onChange={(event) => { setAmountText(event.target.value); invalidateAssessment(); }} /></div>
-        {validAmount ? <div className={`advisor-purchase-result ${within ? "advisor-within" : "advisor-over"}`}>
+        {validAmount && data.spendingGuide.available ? <div className={`advisor-purchase-result ${within ? "advisor-within" : "advisor-over"}`}>
           {within ? <Check size={17} /> : <CircleAlert size={17} />}
-          <div><strong>{within ? "Within your current guardrail" : "Above your current guardrail"}</strong><p>{within ? `${money(afterPurchase, true)} would remain.` : `${money(Math.abs(afterPurchase), true)} over your remaining allowance.`}{share !== null ? ` Uses ${share.toFixed(1)}% of this month’s starting allowance.` : " No flexible allowance is available this month."}</p></div>
+          <div><strong>{within ? "Within your spending room" : "Above your spending room"}</strong><p>{within ? `${money(afterPurchase, true)} would remain.` : `${money(Math.abs(afterPurchase), true)} above your spending room.`}</p></div>
         </div> : null}
-        <button className="btn btn-primary advisor-purchase-button" type="submit" disabled={!validAmount || !description.trim() || assessing}>
+        <button className="btn btn-primary advisor-purchase-button" type="submit" disabled={!data.spendingGuide.available || !validAmount || !description.trim() || assessing}>
           {assessing ? <LoaderCircle size={15} className="tools-spin" /> : <Sparkles size={15} />}
           {assessing ? "Checking your finances…" : "Get the advisor’s take"}
         </button>
       </form>
-      {assessment ? <div className="advisor-assessment" role="status"><Bot size={17} /><p>{assessment}</p></div> : null}
+      {assessment ? <div className="advisor-assessment" role="status"><Bot size={17} /><AdvisorMarkdown>{assessment}</AdvisorMarkdown></div> : null}
       {assessmentError ? <p className="tools-inline-error" role="alert">{assessmentError}</p> : null}
-      <p className="advisor-fine-print">A planning check based on posted activity. Pending spending of {money(data.monthPendingSpend, true)} is separate.</p>
+      <p className="advisor-fine-print">Card balances and pending outflows are already deducted. Upcoming bills still need to fit within this money.</p>
     </article>
   );
 }
 
+export function BudgetEditor({ amount }: { amount: number }) {
+  const router = useRouter();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(amount));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function save(event: React.FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/spending-settings", {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ monthlyBudget: Number(draft) }),
+      });
+      if (!response.ok) throw new Error((await response.json()).error || "Unable to save budget.");
+      setEditing(false);
+      router.refresh();
+    } catch (failure) { setError(failureMessage(failure, "Unable to save budget.")); }
+    finally { setSaving(false); }
+  }
+  if (!editing) return <button className="btn btn-quiet" onClick={() => { setDraft(String(amount)); setError(null); setEditing(true); }}>Edit monthly budget</button>;
+  return <form onSubmit={(event) => void save(event)}>
+    <label className="advisor-field-label" htmlFor="monthly-spending-budget">Monthly budget ($)</label>
+    <input className="field" id="monthly-spending-budget" type="number" min="0" max="1000000" step="0.01" required value={draft} disabled={saving} onChange={(event) => setDraft(event.target.value)} />
+    <button className="btn btn-primary" disabled={saving || draft.trim() === ""} type="submit">{saving ? "Saving…" : "Save budget"}</button>
+    <button className="btn btn-quiet" disabled={saving} type="button" onClick={() => setEditing(false)}>Cancel</button>
+    {error ? <p className="tools-inline-error" role="alert">{error}</p> : null}
+  </form>;
+}
+
 function SpendingContext({ data }: { data: DashboardData }) {
   const guide = data.spendingGuide;
-  const usedPercent = Math.max(0, Math.min(100, guide.usedPercent));
   return (
     <article className="panel advisor-guardrail">
       <div className="panel-header"><div className="advisor-heading-icon"><CircleGauge size={17} /><h2>Your spending room</h2></div><span className="badge">This month</span></div>
-      <div className="advisor-allowance"><strong>{money(guide.remaining, true)}</strong><span>remaining in your flexible allowance</span></div>
-      <div className="advisor-progress" role="progressbar" aria-label="Flexible allowance used" aria-valuenow={usedPercent} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${usedPercent}%` }} /></div>
-      <div className="advisor-progress-labels"><span>{money(data.monthSpend)} spent</span><span>{money(guide.monthlyAllowance)} allowance</span></div>
-      <div className="advisor-protected"><ShieldCheck size={20} /><div><strong>{money(guide.protectedCash)} protected</strong><span>Savings + three months of recent spending, outside the tax reserve</span></div></div>
+      <div className="advisor-allowance"><strong>{guide.available ? money(guide.remaining, true) : "Unavailable"}</strong><span>remaining within your budget and funded cash</span></div>
+      <p className="advisor-fine-print">{guide.available ? `${money(guide.monthlyBudget)} a month for bills and everyday spending. Savings top-ups fund the budget without increasing it.` : "Connect a checking account and resolve missing or unsupported balances to calculate spending room."}</p>
+      <div className="advisor-progress" role="progressbar" aria-label="Monthly budget used" aria-valuenow={guide.usedPercent} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${guide.usedPercent}%` }} /></div>
+      <div className="advisor-progress-labels"><span>{money(guide.postedSpending + guide.pendingSpending)} spent + pending</span><span>{money(guide.monthlyBudget)} budget</span></div>
+      {guide.available && guide.fundedCash < guide.budgetRemaining ? <p className="advisor-fine-print">Your budget has {money(guide.budgetRemaining, true)} left. Transfer {money(guide.budgetRemaining - guide.fundedCash, true)} into checking to fully fund it.</p> : null}
+      {guide.shortfall > 0 ? <p className="tools-inline-error">Card balances and pending outflows exceed your funded cash by {money(guide.shortfall, true)}.</p> : null}
+      <div className="advisor-protected"><ShieldCheck size={20} /><div><strong>{money(guide.protectedCash)} in savings</strong><span>Kept outside your spending room; tax reserve excluded separately</span></div></div>
       <details className="advisor-method">
-        <summary>How your allowance works <ChevronRight size={14} /></summary>
+        <summary>How your spending room works <ChevronRight size={14} /></summary>
         <dl>
-          <div><dt>Posted income</dt><dd>{money(data.monthIncome, true)}</dd></div>
-          <div><dt>Moved to savings / tax reserve</dt><dd>−{money(data.monthSaved, true)}</dd></div>
-          <div><dt>After-savings income</dt><dd>{money(guide.postReserveIncome, true)}</dd></div>
-          <div><dt>{guide.incomeRate}% income allowance</dt><dd>{money(guide.incomeAllowance, true)}</dd></div>
-          <div><dt>Cash above the protected floor</dt><dd>{money(guide.cashCapacity, true)}</dd></div>
-          <div><dt>Starting allowance · lower of the two</dt><dd>{money(guide.monthlyAllowance, true)}</dd></div>
+          <div><dt>Monthly budget</dt><dd>{money(guide.monthlyBudget, true)}</dd></div>
+          <div><dt>Posted spending this month</dt><dd>−{money(guide.postedSpending, true)}</dd></div>
+          <div><dt>Pending spending this month</dt><dd>−{money(guide.pendingSpending, true)}</dd></div>
+          <div><dt>Budget remaining</dt><dd>{money(guide.budgetRemaining, true)}</dd></div>
+          <div><dt>{guide.spendingAccountNames.join(" + ") || "Checking accounts"} · posted balance</dt><dd>{money(guide.spendingCash, true)}</dd></div>
+          <div><dt>Card balances to cover</dt><dd>−{money(guide.cardBalances, true)}</dd></div>
+          <div><dt>Pending outflows to cover</dt><dd>−{money(guide.pendingOutflows, true)}</dd></div>
+          <div><dt>Funded cash</dt><dd>{guide.available ? money(guide.fundedCash, true) : "Unavailable"}</dd></div>
+          <div><dt>Spending room · lower of the two</dt><dd>{guide.available ? money(guide.remaining, true) : "Unavailable"}</dd></div>
         </dl>
-        <p>Your tax reserve of {money(data.taxReserve.balance)} is already excluded from cash available to this guide. The remaining savings balance of {money(guide.reservedCash)} plus three times recent monthly spending of {money(guide.recentMonthlySpend)} stays protected. Investments, savings transfers, card payments, and internal transfers do not count as lifestyle spending. Future income waits until it posts.</p>
+        <p>Your tax reserve of {money(data.taxReserve.balance)} and savings of {money(guide.protectedCash)} stay outside this amount. Moving money between your own accounts does not reduce income. Spending reduces your monthly budget. Funded cash is calculated separately from account balances; posted purchases are not deducted from those balances again. Pending card payments settle balances already covered here.</p>
+        <p>The budget resets each calendar month without rolling unused allowance forward. Upcoming bills still need to fit within the remaining amount. Income reports use bank posting dates, so an owner’s draw can appear in the month after the period it covers. That timing does not set your spending room.</p>
       </details>
+      <BudgetEditor amount={guide.monthlyBudget} />
     </article>
   );
 }
@@ -181,7 +217,7 @@ export function AdvisorView({ data }: { data: DashboardData }) {
         <div className="advisor-daily-mark"><Sparkles size={21} /></div>
         <div className="advisor-daily-copy">
           <div className="advisor-daily-title"><span>Your daily perspective</span><span className="advisor-ai-label">AI briefing</span></div>
-          {briefLoading ? <p className="advisor-loading" role="status"><LoaderCircle size={15} className="tools-spin" /> Reading today’s financial picture…</p> : brief ? <p>{plainText(brief.content)}</p> : <p className="advisor-brief-error" role="alert">{briefError}</p>}
+          {briefLoading ? <p className="advisor-loading" role="status"><LoaderCircle size={15} className="tools-spin" /> Reading today’s financial picture…</p> : brief ? <AdvisorMarkdown>{brief.content}</AdvisorMarkdown> : <p className="advisor-brief-error" role="alert">{briefError}</p>}
           {brief?.updatedAt ? <span className="advisor-brief-time">Prepared {new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(brief.updatedAt) ? `${brief.updatedAt.replace(" ", "T")}Z` : brief.updatedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} · May predate your latest account sync. Chat uses current account data.</span> : null}
         </div>
         {briefError && !briefLoading ? <button className="btn btn-quiet" onClick={() => { setBriefError(null); setBriefLoading(true); setBriefAttempt((value) => value + 1); }}><RefreshCw size={14} /> Retry</button> : null}
@@ -195,7 +231,7 @@ export function AdvisorView({ data }: { data: DashboardData }) {
             {messages.map((message) => {
               const text = message.parts.filter((part) => part.type === "text").map((part) => part.text).join("\n");
               if (!text) return null;
-              return <div className={`advisor-message advisor-message-${message.role}`} key={message.id}><span className="advisor-message-author">{message.role === "user" ? "You" : "Money copilot"}</span><div>{plainText(text)}</div></div>;
+              return <div className={`advisor-message advisor-message-${message.role}`} key={message.id}><span className="advisor-message-author">{message.role === "user" ? "You" : "Money copilot"}</span>{message.role === "user" ? <div>{text}</div> : <AdvisorMarkdown>{text}</AdvisorMarkdown>}</div>;
             })}
             {status === "submitted" ? <div className="advisor-thinking" role="status"><LoaderCircle size={16} className="tools-spin" /> Looking at your numbers…</div> : null}
             {error || sendError ? <div className="advisor-chat-error" role="alert"><CircleAlert size={16} /><div><p>{sendError || "The advisor could not finish its reply. Your conversation is still here."}</p><button onClick={() => { setSendError(null); clearError(); void regenerate().catch((failure) => setSendError(failureMessage(failure, "Unable to retry. Please try again."))); }} disabled={thinking}>Try again</button></div></div> : null}

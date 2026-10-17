@@ -101,6 +101,8 @@ Default to a compact answer: one direct conclusion followed by up to three usefu
 
 Lead with cash outside the tax reserve and net worth after the tax reserve. Reserved tax funds are earmarked and unavailable for lifestyle spending; do not add them back to spending capacity. Transfers to reserve do not reduce earned or taxable income and are not tax payments. The reserve balance is not an estimate of actual tax liability. If you mention gross cash, explicitly reconcile the reserve separately.
 
+Spending room uses checking to fund monthly bills and everyday spending; savings holds cash until checking is topped up. Use spendingGuardrail.remaining: the lower of monthly budget remaining (budget less posted and pending monthly spending) and funded checking cash (checking less card balances and pending outflows). The chosen monthly budget is independent of income. Savings top-ups fund the budget but do not increase it. Unused monthly allowance does not roll over. Do not subtract posted expenses again or treat transfers to savings as lost income. This is a funded monthly budget, not a forecast after future bills. Income reports use bank posting dates; owner’s draws paid twice a month may post in the following month. Never infer an earned month from posting date alone. If spendingGuardrail.available is false, explain that the balance data is incomplete.
+
 Current private financial context:
 ${financialContext(data)}`,
   });
@@ -122,7 +124,7 @@ function chicagoDate() {
 export async function generateDailyBrief(force = false) {
   const date = chicagoDate();
   const data = await loadDashboardData();
-  const contextKey = JSON.stringify(["tax-reserve-v1", data.taxReserve.accountIds, data.taxReserve.balance]);
+  const contextKey = JSON.stringify(["monthly-funded-spending-v3", data.taxReserve.accountIds, data.taxReserve.balance, data.spendingGuide]);
   if (!force) {
     const [cached] = await queryRows<{ content: string; updated_at: string }>(
       "SELECT content, updated_at FROM advisor_insights WHERE insight_date = ? AND context_key = ?",

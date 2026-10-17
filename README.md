@@ -4,15 +4,13 @@ Your own personal finance dashboard: spending, income, account balances, investm
 
 ## Finance workspace
 
-- **Overview:** connected net worth, income, spending, cash flow, recent activity, and account balances.
-- **Transactions:** merchant search, account/category/flow filters, pending and uncategorized views, sorting, pagination, CSV export, and editable categories with merchant learning.
-- **Cash flow:** an interactive flow diagram and income/outflow table, with monthly comparisons and category breakdowns.
-- **Spending:** category, group, and merchant analysis; monthly trends; and estimated recurring charges.
-- **Net worth:** assets, liabilities, allocation, and real recorded balance snapshots.
-- **Investments and accounts:** searchable holdings, institution allocation, connection health, and credit-card payment details.
-- **Money advisor:** the existing AI conversation and saved-insight workflow in the rebuilt interface.
+The original dark, single-page dashboard puts cash, accounts, investments, spending room, the money assistant, and transactions in one place. Tax planning opens from the small **Taxes** link in the top bar.
 
-The shared period controls cover this month, last month, three months, year to date, and all imported history. Category breakdowns open the matching transaction view.
+- Cash and headline net worth exclude designated tax reserves; the reserve remains visible separately.
+- The monthly spending budget is editable and capped by funded checking cash after card balances and pending outflows. Savings and tax reserves stay outside spending room.
+- Transactions have search, account/type/date filters, editable categories, and a show-more control for imported history.
+- Account connections retain the current Plaid repair and sync flows. Existing exchange integrations are unchanged.
+- Tax planning retains reserve account selection and the saved federal/Texas estimate inputs.
 
 ## How the numbers work
 
@@ -22,7 +20,7 @@ Net worth uses full connected account balances, subtracts credit/loan liabilitie
 
 Snapshots are saved when the dashboard is loaded, at most one updated observation per UTC day. They are saved only when contributing bank connections are healthy, available observations are no more than 48 hours old, and configured crypto providers respond successfully. Missing, unsupported, stale, or failed sources block a new snapshot and are disclosed in the interface. There is no historical backfill or background scheduler; charts grow as the app records new observations. Changes to connected accounts can change net worth independently of investment performance. Exchange assets for which the existing provider adapters cannot obtain a USD quote may be omitted.
 
-Cash-balance history is explicitly labeled as a reconstruction from imported bank activity, not recorded net-worth history. Recurring charges require several similar, regularly spaced payments and remain estimates. Prior-period comparisons require earlier imported history; providers can still have gaps in their coverage.
+Cash-balance history is labeled as a reconstruction from imported bank activity. Provider history can have gaps; this chart is not a series of recorded bank balances. The dashboard uses the current calendar month for summary figures and spending room.
 
 ## Let Claude Code set it up
 

@@ -1,3 +1,4 @@
+import { getSpendingGuide, resolveMonthlyBudget } from "@/lib/spending-guide";
 import { automaticSpendingCategory, merchantKey } from "@/lib/categories";
 import { getNetWorth, isFreshObservation, matchInternalTransfers } from "@/lib/analytics";
 import { getCoinbasePortfolio } from "@/lib/coinbase";
@@ -184,8 +185,8 @@ export async function getDashboardData() {
     getCoinbasePortfolio(),
     getKrakenPortfolio(),
     queryRows<{ key: string; value: string }>(
-      "SELECT key, value FROM app_settings WHERE key IN (?, ?)",
-      ["tax_account_ids", "tax_scenario_2026"],
+      "SELECT key, value FROM app_settings WHERE key IN (?, ?, ?)",
+      ["tax_account_ids", "tax_scenario_2026", "monthly_spending_budget"],
     ),
   ]);
 
@@ -301,17 +302,18 @@ export async function getDashboardData() {
     );
   }
 
-  const { totalCash, grossCash, nonTaxSavings: reservedCash } = getReserveAwareCash(reserveAccounts, reserve.accountIds);
-  const recentMonthlySpend = Math.max(monthSpend, previousMonthSpend);
-  // Tax funds are already outside totalCash. Protect only the remaining savings here.
-  const protectedCash = Math.max(0, Math.min(totalCash, reservedCash + recentMonthlySpend * 3));
-  const postReserveIncome = Math.max(0, monthIncome - monthSaved);
-  const incomeAllowance = postReserveIncome > 0
-    ? postReserveIncome * 0.1
-    : Math.max(0, totalCash - reservedCash) * 0.02;
-  const cashCapacity = Math.max(0, totalCash - protectedCash);
-  const monthlyFlexibleAllowance = Math.max(0, Math.min(incomeAllowance, cashCapacity));
-  const flexibleRemaining = Math.max(0, monthlyFlexibleAllowance - monthSpend);
+  const { totalCash, grossCash } = getReserveAwareCash(reserveAccounts, reserve.accountIds);
+  const spendingGuide = getSpendingGuide(reserveAccounts, classified.map((transaction) => ({
+    accountId: transaction.account_id,
+    date: transaction.transaction_date,
+    amount: transaction.amount,
+    pending: Boolean(transaction.pending),
+    flowType: transaction.flowType,
+    currency: transaction.currency,
+  })), reserve.accountIds, {
+    monthlyBudget: resolveMonthlyBudget(settings.get("monthly_spending_budget")),
+    month: new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(now).slice(0, 7),
+  });
 
   const plaidHoldingAccountIds = new Set(holdingRows.map((holding) => holding.account_id));
   const portfolioHoldings = [
@@ -548,20 +550,7 @@ export async function getDashboardData() {
     monthUnallocated: round(monthIncome - monthSpend - monthInvested - monthSaved - monthTaxes),
     spendRate: monthIncome ? round((monthSpend / monthIncome) * 100) : 0,
     previousMonthSpend: round(previousMonthSpend),
-    spendingGuide: {
-      monthlyAllowance: round(monthlyFlexibleAllowance),
-      remaining: round(flexibleRemaining),
-      usedPercent: monthlyFlexibleAllowance
-        ? round(Math.min(100, (monthSpend / monthlyFlexibleAllowance) * 100))
-        : 100,
-      protectedCash: round(protectedCash),
-      reservedCash: round(reservedCash),
-      recentMonthlySpend: round(recentMonthlySpend),
-      postReserveIncome: round(postReserveIncome),
-      incomeAllowance: round(incomeAllowance),
-      cashCapacity: round(cashCapacity),
-      incomeRate: 10,
-    },
+    spendingGuide,
     portfolio: {
       totalValue: round(investmentValue),
       totalCostBasis: holdingsWithCostBasis.length ? round(investmentCostBasis) : null,

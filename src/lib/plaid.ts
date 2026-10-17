@@ -8,6 +8,7 @@ import {
 } from "plaid";
 import { getPlaidConfig } from "@/lib/config";
 import { decrypt } from "@/lib/crypto";
+import { plaidErrorMessage } from "@/lib/plaid-errors";
 import {
   ensureSchema,
   getDb,
@@ -62,6 +63,20 @@ export async function createInvestmentsConsentLinkToken(encryptedAccessToken: st
     ...(config.redirectUri ? { redirect_uri: config.redirectUri } : {}),
   };
   const response = await getPlaidClient().linkTokenCreate(request);
+  return response.data.link_token;
+}
+
+export async function createUpdateLinkToken(encryptedAccessToken: string) {
+  const config = getPlaidConfig();
+  const response = await getPlaidClient().linkTokenCreate({
+    user: { client_user_id: "mantini-money-owner" },
+    client_name: config.clientName,
+    access_token: decrypt(encryptedAccessToken),
+    update: { account_selection_enabled: true },
+    country_codes: [CountryCode.Us],
+    language: "en",
+    ...(config.redirectUri ? { redirect_uri: config.redirectUri } : {}),
+  });
   return response.data.link_token;
 }
 
@@ -327,8 +342,8 @@ export async function syncItem(input: {
   encryptedAccessToken: string;
   cursor: string | null;
 }) {
-  const accessToken = decrypt(input.encryptedAccessToken);
   try {
+    const accessToken = decrypt(input.encryptedAccessToken);
     await ensureSchema();
     const accountsResponse = await getPlaidClient().accountsGet({ access_token: accessToken });
     await saveAccounts(input.itemId, accountsResponse.data.accounts as PlaidAccount[]);
@@ -363,7 +378,7 @@ export async function syncItem(input: {
     await syncLiabilities(accessToken);
     await syncInvestments(input.itemId, accessToken);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Plaid sync failed";
+    const message = plaidErrorMessage(error);
     await markItemError(input.itemId, message);
     throw error;
   }
@@ -371,12 +386,19 @@ export async function syncItem(input: {
 
 export async function syncAllItems() {
   const items = await getStoredItems();
+  const failures: { itemId: string; institutionName: string; message: string }[] = [];
+  let synced = 0;
   for (const item of items) {
-    await syncItem({
-      itemId: item.item_id,
-      encryptedAccessToken: item.access_token,
-      cursor: item.cursor,
-    });
+    try {
+      await syncItem({
+        itemId: item.item_id,
+        encryptedAccessToken: item.access_token,
+        cursor: item.cursor,
+      });
+      synced++;
+    } catch (error) {
+      failures.push({ itemId: item.item_id, institutionName: item.institution_name, message: plaidErrorMessage(error) });
+    }
   }
-  return items.length;
+  return { synced, failures };
 }

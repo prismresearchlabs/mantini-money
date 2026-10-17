@@ -98,6 +98,10 @@ export function ConnectionControls({ environment }: { environment: "sandbox" | "
     setNotice({ message: "Refreshing your bank connections…", tone: "info" });
     try {
       const result = await readResponse(await fetch("/api/plaid/sync", { method: "POST" }));
+      if (result.failures?.length) {
+        setNotice({ message: `Refreshed ${result.synced} connection${result.synced === 1 ? "" : "s"}. ${result.failures.map((failure: { institutionName: string; message: string }) => `${failure.institutionName}: ${failure.message}`).join(" ")}`, tone: "error" });
+        return;
+      }
       setNotice({
         message: typeof result.synced === "number"
           ? result.synced === 0 ? "No bank connections to sync. Add an account to get started." : `Refreshed ${result.synced} bank connection${result.synced === 1 ? "" : "s"}.`
@@ -146,7 +150,11 @@ export function ConnectionControls({ environment }: { environment: "sandbox" | "
   );
 }
 
-export function InvestmentConsentButton({ itemId }: { itemId: string }) {
+export function ManageConnectionButton({ itemId }: { itemId: string }) {
+  return <InvestmentConsentButton itemId={itemId} mode="repair" />;
+}
+
+export function InvestmentConsentButton({ itemId, mode = "investments" }: { itemId: string; mode?: "investments" | "repair" }) {
   const router = useRouter();
   const [linkToken, setLinkToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -154,10 +162,12 @@ export function InvestmentConsentButton({ itemId }: { itemId: string }) {
 
   const onSuccess = useCallback(async () => {
     setBusy(true);
-    setNotice({ message: "Access updated. Refreshing investment accounts…", tone: "info" });
+    setNotice({ message: "Access updated. Refreshing accounts…", tone: "info" });
     try {
-      await readResponse(await fetch("/api/plaid/sync", { method: "POST" }));
-      setNotice({ message: "Access updated. Account refresh complete; available holdings will appear in your portfolio.", tone: "success" });
+      await readResponse(await fetch("/api/plaid/sync", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ itemId }),
+      }));
+      setNotice({ message: mode === "repair" ? "Connection updated. Your accounts have been refreshed." : "Access updated. Account refresh complete; available holdings will appear in your portfolio.", tone: "success" });
     } catch (error) {
       setNotice({ message: `Access updated, but the refresh was incomplete: ${errorMessage(error)}`, tone: "error" });
     } finally {
@@ -165,18 +175,18 @@ export function InvestmentConsentButton({ itemId }: { itemId: string }) {
       setLinkToken(null);
       setBusy(false);
     }
-  }, [router]);
+  }, [router, itemId, mode]);
 
   async function requestConsent() {
     setBusy(true);
     setNotice(null);
     try {
-      const result = await readResponse(await fetch("/api/plaid/investments-consent", {
+      const result = await readResponse(await fetch(mode === "repair" ? "/api/plaid/update-link-token" : "/api/plaid/investments-consent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ itemId }),
       }));
-      if (typeof result.linkToken !== "string") throw new Error("Could not open the investment connection. Please try again.");
+      if (typeof result.linkToken !== "string") throw new Error("Could not open the bank connection. Please try again.");
       setLinkToken(result.linkToken);
     } catch (error) {
       setNotice({ message: errorMessage(error), tone: "error" });
@@ -197,7 +207,7 @@ export function InvestmentConsentButton({ itemId }: { itemId: string }) {
       }} /> : null}
       <button className="btn btn-quiet tools-consent-button" onClick={requestConsent} disabled={busy}>
         {busy ? <LoaderCircle size={14} className="tools-spin" /> : <Link2 size={14} />}
-        {busy ? "Connecting holdings…" : "Connect investment holdings"}
+        {busy ? "Connecting…" : mode === "repair" ? "Manage connection" : "Connect investment holdings"}
       </button>
       {notice ? <p className={notice.tone === "error" ? "tools-inline-error" : "tools-inline-status"} role={notice.tone === "error" ? "alert" : "status"}>{notice.message}</p> : null}
     </div>
